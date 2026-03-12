@@ -78,7 +78,7 @@ ADVICE_REGEX_PATTERN = r"""
 
 @dataclass
 class DataConfig:
-    empathetic_dialogues_id: str = "facebook/empathetic_dialogues"
+    empathetic_dialogues_id: str = "brianist/empathetic_dialogues"
     daily_dialog_id: str = "ConvLab/dailydialog"
     go_emotions_id: str = "google-research-datasets/go_emotions"
     go_emotions_config: str = "simplified"

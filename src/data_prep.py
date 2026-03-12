@@ -454,7 +454,7 @@ def run(config_overrides: dict | None = None) -> dict:
     print("Loading datasets …")
 
     # ── empathetic_dialogues ──────────────────────────────────────────────────
-    print("  facebook/empathetic_dialogues")
+    print(f"  {cfg.empathetic_dialogues_id}")
     ed_ds = load_dataset(cfg.empathetic_dialogues_id)
     ed_train = list(ed_ds["train"])
     rng.shuffle(ed_train)
