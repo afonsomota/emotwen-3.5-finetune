@@ -278,9 +278,9 @@ def _daily_dialog_to_messages(
     dataset,
     system_prompt: str,
 ) -> list[dict]:
-    """Convert roskoN/dailydialog examples to messages dicts.
+    """Convert brianist/roskoN_dailydialog_noscript examples to messages dicts.
 
-    Each row has an 'utterances' list; each utterance has a 'text' field.
+    Each row has an 'utterances' list of plain strings.
     Turns alternate so we assign roles by index position.
     """
     conversations = []
@@ -293,7 +293,7 @@ def _daily_dialog_to_messages(
         has_advice_turn = False
         for i, utt in enumerate(utterances):
             role = "user" if i % 2 == 0 else "assistant"
-            text = utt["text"].strip()
+            text = utt.strip()
             if role == "assistant" and has_advice(text):
                 has_advice_turn = True
                 break
