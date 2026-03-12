@@ -3,7 +3,7 @@ Dataset preparation pipeline for the EmotWen journal companion fine-tuning.
 
 Loads and filters:
   - facebook/empathetic_dialogues  (tone)
-  - daily_dialog                   (tone)
+  - ConvLab/dailydialog            (tone)
   - google-research-datasets/go_emotions  (synthetic journal pairs)
   - dair-ai/emotion                (synthetic journal pairs)
   - nbertagnolli/counsel-chat      (client-side prompts only)
