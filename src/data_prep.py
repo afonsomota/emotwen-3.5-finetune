@@ -325,10 +325,12 @@ def _go_emotions_to_messages(
     rag_fraction: float,
     rag_pool: dict[str, list[str]],
     rng: random.Random,
+    label_feature=None,
     source_tag: str = "go_emotions_synthetic",
 ) -> list[dict]:
     """Create synthetic single-turn journal conversations from go_emotions."""
-    label_feature = dataset.features["labels"].feature
+    if label_feature is None:
+        label_feature = dataset.features["labels"].feature
     conversations = []
 
     for row in dataset:
@@ -498,6 +500,7 @@ def run(config_overrides: dict | None = None) -> dict:
     ge_convs = _go_emotions_to_messages(
         ge_train, SYSTEM_PROMPT_BASE, SYSTEM_PROMPT_RAG,
         cfg.rag_injection_fraction, rag_pool, rng,
+        label_feature=label_feature,
     )
     print(f"    go_emotions synthetic: {len(ge_convs)} conversations")
 
