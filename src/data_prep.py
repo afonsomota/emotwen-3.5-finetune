@@ -278,22 +278,22 @@ def _daily_dialog_to_messages(
     dataset,
     system_prompt: str,
 ) -> list[dict]:
-    """Convert ConvLab/dailydialog examples to messages dicts.
+    """Convert roskoN/dailydialog examples to messages dicts.
 
-    Each row has a 'turns' list; each turn has an 'utterance' field.
-    Turns alternate USR/SYS so we assign roles by index position.
+    Each row has an 'utterances' list; each utterance has a 'text' field.
+    Turns alternate so we assign roles by index position.
     """
     conversations = []
     for row in dataset:
-        turns = row["turns"]
-        if len(turns) < 2:
+        utterances = row["utterances"]
+        if len(utterances) < 2:
             continue
 
         messages = [{"role": "system", "content": system_prompt}]
         has_advice_turn = False
-        for i, turn in enumerate(turns):
+        for i, utt in enumerate(utterances):
             role = "user" if i % 2 == 0 else "assistant"
-            text = turn["utterance"].strip()
+            text = utt["text"].strip()
             if role == "assistant" and has_advice(text):
                 has_advice_turn = True
                 break
@@ -470,7 +470,7 @@ def run(config_overrides: dict | None = None) -> dict:
 
     # ── daily_dialog ──────────────────────────────────────────────────────────
     print("  daily_dialog")
-    dd_ds = load_dataset(cfg.daily_dialog_id, trust_remote_code=True)
+    dd_ds = load_dataset(cfg.daily_dialog_id)
     dd_train = list(dd_ds["train"])
     rng.shuffle(dd_train)
     if cfg.max_daily_dialog:
