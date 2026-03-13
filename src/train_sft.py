@@ -154,8 +154,14 @@ def _run_inference_demo(model, tokenizer, n: int = 3):
         input_text = tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, tokenize=False
         )
-        inputs = tokenizer(input_text, return_tensors="pt", truncation=True,
-                           max_length=MAX_SEQ_LENGTH).to("cuda")
+        # For Qwen VL tokenizers, the first positional argument can be treated as `images`.
+        # Passing the chat template as a keyword `text=` ensures it is handled as pure text.
+        inputs = tokenizer(
+            text=input_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=MAX_SEQ_LENGTH,
+        ).to("cuda")
         with torch.no_grad():
             out = model.generate(
                 **inputs,
