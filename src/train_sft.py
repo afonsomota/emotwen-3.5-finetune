@@ -30,8 +30,17 @@ from src.config import (
 
 
 def _load_model_and_tokenizer(lora_cfg: LoraConfig, from_path: str | None = None):
-    """Load Qwen3.5-0.8B with FastLanguageModel and apply LoRA."""
+    """Load Qwen3.5-0.8B with FastLanguageModel and apply LoRA.
+
+    If from_path points to a saved LoRA adapter directory, the adapter is
+    already embedded in the loaded model, so get_peft_model() must be skipped.
+    """
+    from peft import PeftModelForCausalLM
     from unsloth import FastLanguageModel
+
+    is_adapter = from_path is not None and (
+        Path(from_path) / "adapter_config.json"
+    ).exists()
 
     model_name = from_path if from_path else MODEL_NAME
 
@@ -42,16 +51,17 @@ def _load_model_and_tokenizer(lora_cfg: LoraConfig, from_path: str | None = None
         use_gradient_checkpointing="unsloth",
     )
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_cfg.r,
-        lora_alpha=lora_cfg.lora_alpha,
-        lora_dropout=lora_cfg.lora_dropout,
-        bias=lora_cfg.bias,
-        target_modules=lora_cfg.target_modules,
-        random_state=lora_cfg.random_state,
-        use_rslora=lora_cfg.use_rslora,
-    )
+    if not is_adapter:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_cfg.r,
+            lora_alpha=lora_cfg.lora_alpha,
+            lora_dropout=lora_cfg.lora_dropout,
+            bias=lora_cfg.bias,
+            target_modules=lora_cfg.target_modules,
+            random_state=lora_cfg.random_state,
+            use_rslora=lora_cfg.use_rslora,
+        )
 
     return model, tokenizer
 
