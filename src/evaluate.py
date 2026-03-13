@@ -6,7 +6,7 @@ Metrics
 1. Sentence count distribution   — nltk sentence tokenizer
 2. Advice rate                   — regex blocklist
 3. Emotion alignment             — j-hartmann/emotion-english-distilroberta-base
-4. Empathy score (LLM-as-judge)  — GPT-4o-mini or Claude (optional, requires API key)
+4. Empathy score (LLM-as-judge)  — GPT-4o-mini or Claude; falls back to local Qwen 3.5 4B when no API key is set
 5. Perplexity                    — model log-likelihood on sft_val
 6. "Let me explain:" accuracy    — rule-based
 
@@ -25,6 +25,8 @@ from pathlib import Path
 import torch
 import wandb
 from datasets import load_from_disk
+
+import re
 
 from src.config import (
     MODEL_NAME,
@@ -103,15 +105,67 @@ def _judge_anthropic(user_msg: str, response: str, model: str = "claude-haiku-4-
         return None
 
 
+def _judge_local(user_msg: str, response: str, model_name: str = "unsloth/Qwen3.5-4B") -> dict | None:
+    """Run the judge using a local Qwen model (fallback when no API keys are set)."""
+    try:
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+
+        # Cache model and tokenizer across calls to avoid reloading on every sample
+        cache = _judge_local.__dict__
+        if cache.get("_model_name") != model_name:
+            print(f"[judge] Loading local model: {model_name}")
+            cache["_tokenizer"] = AutoTokenizer.from_pretrained(model_name)
+            cache["_model"] = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+            )
+            cache["_model_name"] = model_name
+
+        tokenizer = cache["_tokenizer"]
+        local_model = cache["_model"]
+
+        messages = [
+            {"role": "system", "content": _JUDGE_SYSTEM},
+            {"role": "user", "content": _JUDGE_USER_TEMPLATE.format(
+                user_message=user_msg, response=response
+            )},
+        ]
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(text, return_tensors="pt").to(local_model.device)
+
+        with torch.no_grad():
+            out = local_model.generate(
+                **inputs,
+                max_new_tokens=100,
+                do_sample=False,
+            )
+
+        generated = tokenizer.decode(
+            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        ).strip()
+
+        match = re.search(r"\{[^{}]*\}", generated, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return None
+    except Exception as e:
+        print(f"[judge] Local error: {e}")
+        return None
+
+
 def _run_llm_judge(
     pairs: list[dict],
     judge_model: str,
     judge_api: str,
+    judge_local_model: str = "unsloth/Qwen3.5-4B",
 ) -> list[dict | None]:
     scores = []
     for p in pairs:
         if judge_api == "anthropic":
             s = _judge_anthropic(p["user_msg"], p["response"], judge_model)
+        elif judge_api == "local":
+            s = _judge_local(p["user_msg"], p["response"], judge_local_model)
         else:
             s = _judge_openai(p["user_msg"], p["response"], judge_model)
         scores.append(s)
@@ -345,13 +399,29 @@ def run(config_overrides: dict | None = None) -> dict:
     llm_warmth_avg = float("nan")
     llm_length_avg = float("nan")
 
-    if cfg.judge_model and (
-        os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-    ):
-        print(f"\n── LLM-as-judge ({cfg.judge_model}) — evaluating 50 samples …")
+    if cfg.judge_model:
+        has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+        has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+        if has_anthropic and cfg.judge_api == "anthropic":
+            active_api = "anthropic"
+            active_model = cfg.judge_model
+        elif has_openai:
+            active_api = "openai"
+            active_model = cfg.judge_model
+        elif has_anthropic:
+            active_api = "anthropic"
+            active_model = cfg.judge_model
+        else:
+            active_api = "local"
+            active_model = cfg.judge_local_model
+
+        print(f"\n── LLM-as-judge ({active_model}, api={active_api}) — evaluating 50 samples …")
         judge_pairs = [{"user_msg": u, "response": r}
                        for u, r in zip(user_messages[:50], responses[:50])]
-        raw_scores = _run_llm_judge(judge_pairs, cfg.judge_model, cfg.judge_api)
+        raw_scores = _run_llm_judge(
+            judge_pairs, active_model, active_api, cfg.judge_local_model
+        )
         judge_scores = [s for s in raw_scores if s is not None]
 
         if judge_scores:
@@ -363,8 +433,6 @@ def run(config_overrides: dict | None = None) -> dict:
             print(f"   no_advice:   {llm_no_advice_avg:.2f}/5")
             print(f"   warmth:      {llm_warmth_avg:.2f}/5")
             print(f"   length_ok:   {llm_length_avg:.2f}/5")
-    else:
-        print("\n── LLM-as-judge skipped (no API key found)")
 
     # ── Perplexity ────────────────────────────────────────────────────────────
     perplexity = float("nan")
