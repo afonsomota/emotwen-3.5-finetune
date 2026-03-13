@@ -25,6 +25,7 @@ from pathlib import Path
 import torch
 import wandb
 from datasets import load_from_disk
+from tqdm import tqdm
 
 import re
 
@@ -161,7 +162,7 @@ def _run_llm_judge(
     judge_local_model: str = "unsloth/Qwen3.5-4B",
 ) -> list[dict | None]:
     scores = []
-    for p in pairs:
+    for p in tqdm(pairs, desc="LLM judge"):
         if judge_api == "anthropic":
             s = _judge_anthropic(p["user_msg"], p["response"], judge_model)
         elif judge_api == "local":
@@ -196,7 +197,7 @@ def _emotion_alignment_rate(
     A coarse proxy — not a perfect metric, but informative.
     """
     matched = 0
-    for p in pairs:
+    for p in tqdm(pairs, desc="Emotion alignment"):
         try:
             u_label = classifier(p["user_msg"])[0][0]["label"]
             r_label = classifier(p["response"])[0][0]["label"]
@@ -218,7 +219,7 @@ def _compute_perplexity(model, tokenizer, val_ds, max_samples: int = 100) -> flo
     total_nll = 0.0
     total_tokens = 0
 
-    for i, example in enumerate(val_ds):
+    for i, example in enumerate(tqdm(val_ds, desc="Perplexity", total=min(max_samples, len(val_ds)))):
         if i >= max_samples:
             break
         text = tokenizer.apply_chat_template(
@@ -293,7 +294,7 @@ def run(config_overrides: dict | None = None) -> dict:
     responses = []
     user_messages = []
 
-    for example in eval_ds:
+    for example in tqdm(eval_ds, desc="Inference", total=n):
         msgs = example["messages"]
         # Find the last user message
         last_user = next(
