@@ -35,7 +35,6 @@ def _load_model_and_tokenizer(lora_cfg: LoraConfig, from_path: str | None = None
     If from_path points to a saved LoRA adapter directory, the adapter is
     already embedded in the loaded model, so get_peft_model() must be skipped.
     """
-    from peft import PeftModelForCausalLM
     from unsloth import FastLanguageModel
 
     is_adapter = from_path is not None and (
@@ -48,6 +47,7 @@ def _load_model_and_tokenizer(lora_cfg: LoraConfig, from_path: str | None = None
         model_name=model_name,
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=lora_cfg.load_in_4bit,
+        dtype=None,  # auto-detect: bfloat16 on Ampere+, float16 on T4
         use_gradient_checkpointing="unsloth",
     )
 
@@ -85,6 +85,7 @@ def _format_dataset(dataset, tokenizer):
 def _build_trainer(model, tokenizer, train_ds, val_ds, sft_cfg, stage_name: str):
     """Build SFTTrainer with response-only loss masking."""
     from trl import SFTTrainer, SFTConfig
+    from unsloth import is_bfloat16_supported
     from unsloth.chat_templates import train_on_responses_only
 
     trainer_args = SFTConfig(
@@ -93,6 +94,8 @@ def _build_trainer(model, tokenizer, train_ds, val_ds, sft_cfg, stage_name: str)
         warmup_steps=sft_cfg.warmup_steps,
         max_steps=sft_cfg.max_steps,
         learning_rate=sft_cfg.learning_rate,
+        fp16=not is_bfloat16_supported(),
+        bf16=is_bfloat16_supported(),
         lr_scheduler_type=sft_cfg.lr_scheduler_type,
         optim=sft_cfg.optim,
         weight_decay=sft_cfg.weight_decay,
@@ -210,6 +213,7 @@ def run(config_overrides: dict | None = None) -> dict:
 
     stage = "both"
     if config_overrides:
+        config_overrides = config_overrides.copy()  # avoid mutating caller's dict
         stage = config_overrides.pop("stage", "both")
         for k, v in config_overrides.items():
             for cfg in (lora_cfg, s1_cfg, s2_cfg, wb_cfg):
