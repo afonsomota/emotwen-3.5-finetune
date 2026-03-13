@@ -61,7 +61,7 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
         bias=lora_cfg.bias,
         target_modules=lora_cfg.target_modules,
         random_state=lora_cfg.random_state,
-        use_rslora=False,
+        use_rslora=lora_cfg.use_rslora,
     )
 
     return model, tokenizer

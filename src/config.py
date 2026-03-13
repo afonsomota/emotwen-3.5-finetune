@@ -24,7 +24,8 @@ FINAL_MERGED_DIR = str(OUTPUTS_DIR / "final_merged")
 
 MODEL_NAME = "unsloth/Qwen3.5-0.8B"
 MAX_SEQ_LENGTH = 1024
-LOAD_IN_4BIT = False  # 16-bit LoRA
+# Default for model loading (4-bit QLoRA). Override via LoraConfig.load_in_4bit in SFT.
+LOAD_IN_4BIT = True
 
 # ─── System Prompts ───────────────────────────────────────────────────────────
 
@@ -115,6 +116,7 @@ class DataConfig:
 
 @dataclass
 class LoraConfig:
+    load_in_4bit: bool = LOAD_IN_4BIT  # 4-bit QLoRA; set False for 16-bit LoRA
     r: int = 16
     lora_alpha: int = 16
     lora_dropout: float = 0.0
@@ -123,6 +125,7 @@ class LoraConfig:
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj",
     ])
+    use_rslora: bool = True  # Recommended for 4-bit QLoRA; stabilises effective LR
     random_state: int = 3407
 
 
@@ -198,6 +201,7 @@ class GRPOLoraConfig:
     target_modules: list = field(default_factory=lambda: [
         "q_proj", "k_proj", "v_proj", "o_proj",
     ])
+    use_rslora: bool = True  # Match SFT when base is 4-bit
     random_state: int = 3407
 
 

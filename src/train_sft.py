@@ -21,7 +21,6 @@ from datasets import load_from_disk
 from src.config import (
     MODEL_NAME,
     MAX_SEQ_LENGTH,
-    LOAD_IN_4BIT,
     SFT_TRAIN_DIR,
     SFT_VAL_DIR,
     DEFAULT_LORA_CONFIG,
@@ -44,7 +43,7 @@ def _load_model_and_tokenizer(lora_cfg: LoraConfig, from_path: str | None = None
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
         max_seq_length=MAX_SEQ_LENGTH,
-        load_in_4bit=LOAD_IN_4BIT,
+        load_in_4bit=lora_cfg.load_in_4bit,
         use_gradient_checkpointing="unsloth",
     )
 
@@ -56,7 +55,7 @@ def _load_model_and_tokenizer(lora_cfg: LoraConfig, from_path: str | None = None
         bias=lora_cfg.bias,
         target_modules=lora_cfg.target_modules,
         random_state=lora_cfg.random_state,
-        use_rslora=False,
+        use_rslora=lora_cfg.use_rslora,
     )
 
     return model, tokenizer
