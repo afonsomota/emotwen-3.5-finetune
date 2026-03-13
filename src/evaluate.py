@@ -132,7 +132,7 @@ def _judge_local(user_msg: str, response: str, model_name: str = "unsloth/Qwen3.
             )},
         ]
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(text, return_tensors="pt").to(local_model.device)
+        inputs = tokenizer(text=text, return_tensors="pt").to(local_model.device)
 
         with torch.no_grad():
             out = local_model.generate(
@@ -224,7 +224,7 @@ def _compute_perplexity(model, tokenizer, val_ds, max_samples: int = 100) -> flo
         text = tokenizer.apply_chat_template(
             example["messages"], tokenize=False, add_generation_prompt=False
         )
-        enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LENGTH)
+        enc = tokenizer(text=text, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LENGTH)
         input_ids = enc["input_ids"].to("cuda")
         with torch.no_grad():
             out = model(input_ids, labels=input_ids)
@@ -306,7 +306,7 @@ def run(config_overrides: dict | None = None) -> dict:
             prompt_msgs, add_generation_prompt=True, tokenize=False
         )
         inputs = tokenizer(
-            input_text, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LENGTH
+            text=input_text, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LENGTH
         ).to("cuda")
 
         with torch.no_grad():
