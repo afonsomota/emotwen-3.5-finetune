@@ -208,6 +208,7 @@ def run(config_overrides: dict | None = None) -> dict:
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     results: dict = {}
+    from unsloth import unsloth_train  # Fixed gradient accumulation (https://unsloth.ai/blog/gradient)
 
     # ── Load datasets ─────────────────────────────────────────────────────────
     print("Loading training datasets from disk …")
@@ -248,7 +249,7 @@ def run(config_overrides: dict | None = None) -> dict:
 
         trainer1 = _build_trainer(model, tokenizer, s1_train_fmt, s1_val_fmt, s1_cfg, f"sft_stage1_{run_ts}")
         _print_gpu_stats("before stage 1 training")
-        trainer1.train()
+        unsloth_train(trainer1)
         _print_gpu_stats("after stage 1 training")
 
         s1_eval_loss = trainer1.state.best_metric or float("nan")
@@ -300,7 +301,7 @@ def run(config_overrides: dict | None = None) -> dict:
 
         trainer2 = _build_trainer(model, tokenizer, s2_train_fmt, s2_val_fmt, s2_cfg, f"sft_stage2_{run_ts}")
         _print_gpu_stats("before stage 2 training")
-        trainer2.train()
+        unsloth_train(trainer2)
         _print_gpu_stats("after stage 2 training")
 
         s2_eval_loss = trainer2.state.best_metric or float("nan")
