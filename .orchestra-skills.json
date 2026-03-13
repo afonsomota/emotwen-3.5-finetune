@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "installedAt": "2026-03-13T22:21:50.090Z",
+  "skills": [
+    {
+      "category": "06-post-training",
+      "skill": "grpo-rl-training",
+      "standalone": false
+    },
+    {
+      "category": "03-fine-tuning",
+      "skill": "unsloth",
+      "standalone": false
+    },
+    {
+      "category": "12-inference-serving",
+      "skill": "vllm",
+      "standalone": false
+    },
+    {
+      "category": "10-optimization",
+      "skill": "flash-attention",
+      "standalone": false
+    }
+  ],
+  "agents": [
+    "claude"
+  ]
+}
