@@ -186,6 +186,8 @@ class EvalConfig:
     # LLM-as-judge (set to None to skip)
     judge_model: str = "gpt-4o-mini"  # or "claude-3-5-haiku-20241022"
     judge_api: str = "openai"  # "openai" or "anthropic"
+    # Local model used as judge fallback when no API key is available
+    judge_local_model: str = "unsloth/Qwen3.5-4B"
 
     results_save_path: str = str(OUTPUTS_DIR / "eval_results.json")
     report_to: str = "wandb"
