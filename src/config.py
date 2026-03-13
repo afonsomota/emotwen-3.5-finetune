@@ -141,8 +141,8 @@ class SFTStage1Config:
     optim: str = "adamw_8bit"
     weight_decay: float = 0.01
     logging_steps: int = 10
-    save_steps: int = 100
-    eval_steps: int = 100
+    save_steps: int = 50
+    eval_steps: int = 50
     packing: bool = True
     seed: int = 3407
     report_to: str = "wandb"
