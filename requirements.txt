@@ -1,0 +1,23 @@
+# Core training stack
+unsloth
+unsloth_zoo
+trl==0.22.2
+transformers==5.2.0
+tokenizers
+peft
+
+# GPU extras — require torch to be installed first:
+#   pip install --no-build-isolation flash-linear-attention causal_conv1d==1.6.0
+# flash-linear-attention
+# causal_conv1d==1.6.0
+
+# Data
+datasets
+nltk
+
+# Experiment tracking
+wandb
+
+# LLM judge (optional)
+openai
+anthropic
