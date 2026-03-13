@@ -8,8 +8,6 @@ Entry point: run(config_overrides: dict | None = None) -> dict
 """
 
 from __future__ import annotations
-
-import os
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -28,9 +26,6 @@ from src.config import (
     DEFAULT_SFT_STAGE2_CONFIG,
     DEFAULT_WANDB_CONFIG,
     LoraConfig,
-    SFTStage1Config,
-    SFTStage2Config,
-    WandbConfig,
 )
 
 
@@ -235,14 +230,15 @@ def run(config_overrides: dict | None = None) -> dict:
     if stage in ("1", "both"):
         print("\n═══ Stage 1: Tone SFT ══════════════════════════════════════")
 
-        wandb.init(
-            project=wb_cfg.project,
-            entity=wb_cfg.entity or None,
-            name=config_overrides.get("run_name_s1", f"sft_stage1_{run_ts}") if config_overrides else f"sft_stage1_{run_ts}",
-            job_type="sft_stage1",
-            config={**asdict(lora_cfg), **asdict(s1_cfg)},
-            tags=wb_cfg.tags,
-        )
+        if s1_cfg.report_to == "wandb":
+            wandb.init(
+                project=wb_cfg.project,
+                entity=wb_cfg.entity or None,
+                name=config_overrides.get("run_name_s1", f"sft_stage1_{run_ts}") if config_overrides else f"sft_stage1_{run_ts}",
+                job_type="sft_stage1",
+                config={**asdict(lora_cfg), **asdict(s1_cfg)},
+                tags=wb_cfg.tags,
+            )
 
         model, tokenizer = _load_model_and_tokenizer(lora_cfg)
 
@@ -268,8 +264,9 @@ def run(config_overrides: dict | None = None) -> dict:
 
         _run_inference_demo(model, tokenizer)
 
-        wandb.log({"stage1_eval_loss": s1_eval_loss})
-        wandb.finish()
+        if wandb.run is not None:
+            wandb.log({"stage1_eval_loss": s1_eval_loss})
+            wandb.finish()
 
         results["stage1_adapter"] = s1_cfg.output_dir
         results["stage1_eval_loss"] = s1_eval_loss
@@ -282,14 +279,15 @@ def run(config_overrides: dict | None = None) -> dict:
     if stage in ("2", "both"):
         print("\n═══ Stage 2: Journal Domain SFT ════════════════════════════")
 
-        wandb.init(
-            project=wb_cfg.project,
-            entity=wb_cfg.entity or None,
-            name=config_overrides.get("run_name_s2", f"sft_stage2_{run_ts}") if config_overrides else f"sft_stage2_{run_ts}",
-            job_type="sft_stage2",
-            config={**asdict(lora_cfg), **asdict(s2_cfg)},
-            tags=wb_cfg.tags,
-        )
+        if s2_cfg.report_to == "wandb":
+            wandb.init(
+                project=wb_cfg.project,
+                entity=wb_cfg.entity or None,
+                name=config_overrides.get("run_name_s2", f"sft_stage2_{run_ts}") if config_overrides else f"sft_stage2_{run_ts}",
+                job_type="sft_stage2",
+                config={**asdict(lora_cfg), **asdict(s2_cfg)},
+                tags=wb_cfg.tags,
+            )
 
         # Load from stage 1 adapter (or fresh base if stage 1 was skipped)
         s1_path = results.get("stage1_adapter", s1_cfg.output_dir)
@@ -320,8 +318,9 @@ def run(config_overrides: dict | None = None) -> dict:
 
         _run_inference_demo(model, tokenizer)
 
-        wandb.log({"stage2_eval_loss": s2_eval_loss})
-        wandb.finish()
+        if wandb.run is not None:
+            wandb.log({"stage2_eval_loss": s2_eval_loss})
+            wandb.finish()
 
         results["stage2_adapter"] = s2_cfg.output_dir
         results["stage2_eval_loss"] = s2_eval_loss
