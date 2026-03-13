@@ -238,39 +238,42 @@ def _ed_split_to_messages(
     dataset,
     system_prompt: str,
 ) -> list[dict]:
-    """Convert empathetic_dialogues split to list of messages dicts."""
-    # Group by conv_id
-    from collections import defaultdict
-    groups: dict[str, list] = defaultdict(list)
-    for row in dataset:
-        groups[row["conv_id"]].append(row)
-
+    """
+    Convert empathetic_dialogues split to list of messages dicts.
+    
+    Example entry:
+    {
+        "conv_id": "hit:0_conv:1",
+        "situation": "The user is feeling sad because they lost their job.",
+        "emotion": "sadness",
+        "conversations": [
+            {"role": "user", "content": "Hello, how are you?"},
+            {"role": "assistant", "content": "I'm doing well, thank you!"},
+        ]
+    }
+    """
     conversations = []
-    for conv_id, turns in groups.items():
-        turns.sort(key=lambda x: x["utterance_idx"])
+    for row in dataset:
         messages = [{"role": "system", "content": system_prompt}]
-        has_advice_turn = False
-        for turn in turns:
-            role = "user" if turn["speaker_idx"] == 0 else "assistant"
-            text = turn["utterance"].strip()
-            if role == "assistant" and has_advice(text):
-                has_advice_turn = True
+        conversation = row["conversations"]
+        for turn in conversation:
+            if turn["role"] == "assistant" and has_advice(turn["content"]):
+                # Remove the previous user turn, we stay with the conversation
+                # up until before the advice turn.
+                messages = messages[:-1]
                 break
-            messages.append({"role": role, "content": text})
-
-        if has_advice_turn:
-            continue
-        # Need at least system + 1 user + 1 assistant
-        if len(messages) < 3:
-            continue
+            messages.append({"role": turn["role"], "content": turn["content"]})
         # Ensure the last message is from assistant
         if messages[-1]["role"] != "assistant":
             messages = messages[:-1]
+        # Ensure there are at least 3 messages (system + 1 turn each)
         if len(messages) < 3:
+            # Skip if we don't have enough messages
             continue
-
-        conversations.append({"messages": messages, "source": "empathetic_dialogues"})
-
+        conversations.append({
+            "messages": messages,
+            "source": "empathetic_dialogues",
+        })
     return conversations
 
 
