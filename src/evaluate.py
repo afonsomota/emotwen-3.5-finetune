@@ -155,7 +155,7 @@ def _judge_local_batch(
         for start in tqdm(range(0, len(texts), batch_size), desc="LLM judge (local)"):
             batch_texts = texts[start:start + batch_size]
             inputs = tokenizer(
-                batch_texts, padding=True, truncation=True,
+                text=batch_texts, padding=True, truncation=True,
                 max_length=MAX_SEQ_LENGTH, return_tensors="pt"
             ).to(device)
             input_lengths = inputs["input_ids"].shape[1]
@@ -271,7 +271,7 @@ def _compute_perplexity(
     for start in tqdm(range(0, len(texts), batch_size), desc="Perplexity"):
         batch_texts = texts[start:start + batch_size]
         enc = tokenizer(
-            batch_texts, padding=True, truncation=True,
+            text=batch_texts, padding=True, truncation=True,
             max_length=MAX_SEQ_LENGTH, return_tensors="pt"
         )
         input_ids = enc["input_ids"].to(device)
