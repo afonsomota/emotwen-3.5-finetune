@@ -370,7 +370,7 @@ def run(config_overrides: dict | None = None) -> dict:
     for start in tqdm(range(0, len(all_prompt_texts), cfg.eval_batch_size), desc="Inference"):
         batch_texts = all_prompt_texts[start:start + cfg.eval_batch_size]
         inputs = tokenizer(
-            batch_texts, padding=True, truncation=True,
+            text=batch_texts, padding=True, truncation=True,
             max_length=MAX_SEQ_LENGTH, return_tensors="pt"
         ).to(device)
         input_len = inputs["input_ids"].shape[1]
