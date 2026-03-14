@@ -108,14 +108,27 @@ def _judge_anthropic(user_msg: str, response: str, model: str = "claude-haiku-4-
 
 def _judge_local(user_msg: str, response: str, model_name: str = "unsloth/Qwen3.5-4B") -> dict | None:
     """Run the judge using a local Qwen model (fallback when no API keys are set)."""
+    results = _judge_local_batch([{"user_msg": user_msg, "response": response}], model_name, batch_size=1)
+    return results[0]
+
+
+def _judge_local_batch(
+    pairs: list[dict],
+    model_name: str = "unsloth/Qwen3.5-4B",
+    batch_size: int = 8,
+) -> list[dict | None]:
+    """Batch local judge inference across all pairs."""
     try:
         from transformers import AutoTokenizer, AutoModelForCausalLM
 
-        # Cache model and tokenizer across calls to avoid reloading on every sample
         cache = _judge_local.__dict__
         if cache.get("_model_name") != model_name:
             print(f"[judge] Loading local model: {model_name}")
-            cache["_tokenizer"] = AutoTokenizer.from_pretrained(model_name)
+            tok = AutoTokenizer.from_pretrained(model_name)
+            tok.padding_side = "left"
+            if tok.pad_token is None:
+                tok.pad_token = tok.eos_token
+            cache["_tokenizer"] = tok
             cache["_model"] = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
@@ -125,34 +138,51 @@ def _judge_local(user_msg: str, response: str, model_name: str = "unsloth/Qwen3.
 
         tokenizer = cache["_tokenizer"]
         local_model = cache["_model"]
+        device = next(local_model.parameters()).device
 
-        messages = [
-            {"role": "system", "content": _JUDGE_SYSTEM},
-            {"role": "user", "content": _JUDGE_USER_TEMPLATE.format(
-                user_message=user_msg, response=response
-            )},
-        ]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(text=text, return_tensors="pt").to(local_model.device)
+        # Build all prompt texts
+        texts = []
+        for p in pairs:
+            messages = [
+                {"role": "system", "content": _JUDGE_SYSTEM},
+                {"role": "user", "content": _JUDGE_USER_TEMPLATE.format(
+                    user_message=p["user_msg"], response=p["response"]
+                )},
+            ]
+            texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
 
-        with torch.no_grad():
-            out = local_model.generate(
-                **inputs,
-                max_new_tokens=100,
-                do_sample=False,
-            )
+        results: list[dict | None] = []
+        for start in tqdm(range(0, len(texts), batch_size), desc="LLM judge (local)"):
+            batch_texts = texts[start:start + batch_size]
+            inputs = tokenizer(
+                batch_texts, padding=True, truncation=True,
+                max_length=MAX_SEQ_LENGTH, return_tensors="pt"
+            ).to(device)
+            input_lengths = inputs["input_ids"].shape[1]
 
-        generated = tokenizer.decode(
-            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        ).strip()
+            with torch.no_grad():
+                out = local_model.generate(
+                    **inputs,
+                    max_new_tokens=100,
+                    do_sample=False,
+                )
 
-        match = re.search(r"\{[^{}]*\}", generated, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-        return None
+            for i in range(len(batch_texts)):
+                new_tokens = out[i][input_lengths:]
+                generated = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+                match = re.search(r"\{[^{}]*\}", generated, re.DOTALL)
+                if match:
+                    try:
+                        results.append(json.loads(match.group()))
+                    except Exception:
+                        results.append(None)
+                else:
+                    results.append(None)
+
+        return results
     except Exception as e:
-        print(f"[judge] Local error: {e}")
-        return None
+        print(f"[judge] Local batch error: {e}")
+        return [None] * len(pairs)
 
 
 def _run_llm_judge(
@@ -160,13 +190,15 @@ def _run_llm_judge(
     judge_model: str,
     judge_api: str,
     judge_local_model: str = "unsloth/Qwen3.5-4B",
+    batch_size: int = 8,
 ) -> list[dict | None]:
+    if judge_api == "local":
+        return _judge_local_batch(pairs, judge_local_model, batch_size=batch_size)
+
     scores = []
     for p in tqdm(pairs, desc="LLM judge"):
         if judge_api == "anthropic":
             s = _judge_anthropic(p["user_msg"], p["response"], judge_model)
-        elif judge_api == "local":
-            s = _judge_local(p["user_msg"], p["response"], judge_local_model)
         else:
             s = _judge_openai(p["user_msg"], p["response"], judge_model)
         scores.append(s)
@@ -191,49 +223,71 @@ def _build_emotion_classifier(model_id: str):
 def _emotion_alignment_rate(
     classifier,
     pairs: list[dict],
+    batch_size: int = 8,
 ) -> float:
     """
     Fraction of (user_msg, response) pairs where the top emotion label matches.
     A coarse proxy — not a perfect metric, but informative.
     """
-    matched = 0
-    for p in tqdm(pairs, desc="Emotion alignment"):
-        try:
-            u_label = classifier(p["user_msg"])[0][0]["label"]
-            r_label = classifier(p["response"])[0][0]["label"]
-            if u_label == r_label:
-                matched += 1
-        except Exception:
-            pass
+    user_texts = [p["user_msg"] for p in pairs]
+    resp_texts = [p["response"] for p in pairs]
+    try:
+        u_results = classifier(user_texts, batch_size=batch_size)
+        r_results = classifier(resp_texts, batch_size=batch_size)
+        matched = sum(
+            u[0]["label"] == r[0]["label"]
+            for u, r in zip(u_results, r_results)
+        )
+    except Exception:
+        matched = 0
     return matched / len(pairs) if pairs else 0.0
 
 
 # ─── Perplexity ───────────────────────────────────────────────────────────────
 
-def _compute_perplexity(model, tokenizer, val_ds, max_samples: int = 100) -> float:
+def _compute_perplexity(
+    model, tokenizer, val_ds, max_samples: int = 100, batch_size: int = 8
+) -> float:
     """Average per-token negative log-likelihood on val set (proxy for perplexity)."""
     from unsloth import FastLanguageModel
     FastLanguageModel.for_inference(model)
     model.eval()
 
+    device = next(model.parameters()).device
+    orig_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "right"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    examples = list(val_ds)[:max_samples]
+    texts = [
+        tokenizer.apply_chat_template(ex["messages"], tokenize=False, add_generation_prompt=False)
+        for ex in examples
+    ]
+
     total_nll = 0.0
     total_tokens = 0
 
-    for i, example in enumerate(tqdm(val_ds, desc="Perplexity", total=min(max_samples, len(val_ds)))):
-        if i >= max_samples:
-            break
-        text = tokenizer.apply_chat_template(
-            example["messages"], tokenize=False, add_generation_prompt=False
+    for start in tqdm(range(0, len(texts), batch_size), desc="Perplexity"):
+        batch_texts = texts[start:start + batch_size]
+        enc = tokenizer(
+            batch_texts, padding=True, truncation=True,
+            max_length=MAX_SEQ_LENGTH, return_tensors="pt"
         )
-        enc = tokenizer(text=text, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LENGTH)
-        input_ids = enc["input_ids"].to("cuda")
-        with torch.no_grad():
-            out = model(input_ids, labels=input_ids)
-        # out.loss is mean NLL per token
-        n_tokens = input_ids.shape[1]
-        total_nll += out.loss.item() * n_tokens
-        total_tokens += n_tokens
+        input_ids = enc["input_ids"].to(device)
+        attention_mask = enc["attention_mask"].to(device)
 
+        labels = input_ids.clone()
+        labels[labels == tokenizer.pad_token_id] = -100
+
+        with torch.no_grad():
+            out = model(input_ids, attention_mask=attention_mask, labels=labels)
+
+        n_real_tokens = (labels != -100).sum().item()
+        total_nll += out.loss.item() * n_real_tokens
+        total_tokens += n_real_tokens
+
+    tokenizer.padding_side = orig_padding_side
     return total_nll / total_tokens if total_tokens > 0 else float("nan")
 
 
@@ -290,25 +344,36 @@ def run(config_overrides: dict | None = None) -> dict:
     eval_ds = eval_ds.select(range(n))
     print(f"Evaluating {n} examples")
 
-    # ── Generate responses ────────────────────────────────────────────────────
+    # ── Generate responses (batched) ──────────────────────────────────────────
     responses = []
     user_messages = []
 
-    for example in tqdm(eval_ds, desc="Inference", total=n):
+    # Collect all prompt texts and last user messages in one pass
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    all_prompt_texts = []
+    all_last_users = []
+    for example in eval_ds:
         msgs = example["messages"]
-        # Find the last user message
         last_user = next(
             (m["content"] for m in reversed(msgs) if m["role"] == "user"), ""
         )
-        # Drop last assistant turn if present (we generate it)
         prompt_msgs = [m for m in msgs if not (m == msgs[-1] and m["role"] == "assistant")]
-
-        input_text = tokenizer.apply_chat_template(
-            prompt_msgs, add_generation_prompt=True, tokenize=False
+        all_prompt_texts.append(
+            tokenizer.apply_chat_template(prompt_msgs, add_generation_prompt=True, tokenize=False)
         )
+        all_last_users.append(last_user)
+
+    device = next(model.parameters()).device
+    for start in tqdm(range(0, len(all_prompt_texts), cfg.eval_batch_size), desc="Inference"):
+        batch_texts = all_prompt_texts[start:start + cfg.eval_batch_size]
         inputs = tokenizer(
-            text=input_text, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LENGTH
-        ).to("cuda")
+            batch_texts, padding=True, truncation=True,
+            max_length=MAX_SEQ_LENGTH, return_tensors="pt"
+        ).to(device)
+        input_len = inputs["input_ids"].shape[1]
 
         with torch.no_grad():
             out = model.generate(
@@ -319,13 +384,14 @@ def run(config_overrides: dict | None = None) -> dict:
                 do_sample=True,
                 use_cache=True,
             )
-        response = tokenizer.decode(
-            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        ).strip()
 
-        responses.append(response)
-        user_messages.append(last_user)
+        for i in range(len(batch_texts)):
+            response = tokenizer.decode(
+                out[i][input_len:], skip_special_tokens=True
+            ).strip()
+            responses.append(response)
 
+    user_messages = all_last_users
     print(f"Generated {len(responses)} responses")
 
     # ── Sentence count analysis ───────────────────────────────────────────────
@@ -386,7 +452,7 @@ def run(config_overrides: dict | None = None) -> dict:
         emotion_clf = _build_emotion_classifier(cfg.emotion_classifier_id)
         pairs = [{"user_msg": u, "response": r}
                  for u, r in zip(user_messages[:50], responses[:50])]  # cap at 50
-        emotion_alignment = _emotion_alignment_rate(emotion_clf, pairs)
+        emotion_alignment = _emotion_alignment_rate(emotion_clf, pairs, batch_size=cfg.eval_batch_size)
         print(f"   Emotion alignment: {emotion_alignment:.1%}")
         del emotion_clf
         torch.cuda.empty_cache()
@@ -421,7 +487,8 @@ def run(config_overrides: dict | None = None) -> dict:
         judge_pairs = [{"user_msg": u, "response": r}
                        for u, r in zip(user_messages[:50], responses[:50])]
         raw_scores = _run_llm_judge(
-            judge_pairs, active_model, active_api, cfg.judge_local_model
+            judge_pairs, active_model, active_api, cfg.judge_local_model,
+            batch_size=cfg.eval_batch_size,
         )
         judge_scores = [s for s in raw_scores if s is not None]
 
@@ -442,7 +509,7 @@ def run(config_overrides: dict | None = None) -> dict:
         from datasets import load_from_disk as _lfd
         from src.config import SFT_VAL_DIR
         val_ds = _lfd(SFT_VAL_DIR)
-        perplexity = _compute_perplexity(model, tokenizer, val_ds, max_samples=100)
+        perplexity = _compute_perplexity(model, tokenizer, val_ds, max_samples=100, batch_size=cfg.eval_batch_size)
         print(f"   Perplexity proxy (mean NLL/token): {perplexity:.4f}")
     except Exception as e:
         print(f"   Perplexity skipped: {e}")

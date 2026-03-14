@@ -19,6 +19,7 @@ SFT_STAGE1_DIR = str(OUTPUTS_DIR / "sft_stage1")
 SFT_STAGE2_DIR = str(OUTPUTS_DIR / "sft_stage2")
 GRPO_ADAPTER_DIR = str(OUTPUTS_DIR / "grpo_adapter")
 FINAL_MERGED_DIR = str(OUTPUTS_DIR / "final_merged")
+GGUF_DIR = str(OUTPUTS_DIR / "final_gguf")
 
 # ─── Model ────────────────────────────────────────────────────────────────────
 
@@ -117,7 +118,7 @@ class DataConfig:
 @dataclass
 class LoraConfig:
     load_in_4bit: bool = LOAD_IN_4BIT  # 4-bit QLoRA; set False for 16-bit LoRA
-    r: int = 16
+    r: int = 8
     lora_alpha: int = 16
     lora_dropout: float = 0.0
     bias: str = "none"
@@ -132,7 +133,7 @@ class LoraConfig:
 @dataclass
 class SFTStage1Config:
     output_dir: str = SFT_STAGE1_DIR
-    per_device_train_batch_size: int = 2
+    per_device_train_batch_size: int = 4
     gradient_accumulation_steps: int = 4
     warmup_steps: int = 10
     max_steps: int = 200
@@ -151,7 +152,7 @@ class SFTStage1Config:
 @dataclass
 class SFTStage2Config:
     output_dir: str = SFT_STAGE2_DIR
-    per_device_train_batch_size: int = 2
+    per_device_train_batch_size: int = 4
     gradient_accumulation_steps: int = 4
     warmup_steps: int = 5
     max_steps: int = 150
@@ -176,6 +177,8 @@ class EvalConfig:
     max_new_tokens: int = 200
     temperature: float = 0.7
     top_p: float = 0.9
+
+    eval_batch_size: int = 8  # Inference batch size for all GPU stages
 
     # GRPO trigger threshold
     grpo_trigger_pct: float = 0.15  # >15% of outputs > 5 sentences → run GRPO

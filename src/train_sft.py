@@ -8,6 +8,7 @@ Entry point: run(config_overrides: dict | None = None) -> dict
 """
 
 from __future__ import annotations
+from copy import copy
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -15,12 +16,14 @@ from pathlib import Path
 import torch
 import wandb
 from datasets import load_from_disk
+from unsloth import unsloth_train  # Fixed gradient accumulation (https://unsloth.ai/blog/gradient)
 
 from src.config import (
     MODEL_NAME,
     MAX_SEQ_LENGTH,
     SFT_TRAIN_DIR,
     SFT_VAL_DIR,
+    GGUF_DIR,
     DEFAULT_LORA_CONFIG,
     DEFAULT_SFT_STAGE1_CONFIG,
     DEFAULT_SFT_STAGE2_CONFIG,
@@ -169,7 +172,7 @@ def _run_inference_demo(model, tokenizer, n: int = 3):
             return_tensors="pt",
             truncation=True,
             max_length=MAX_SEQ_LENGTH,
-        ).to("cuda")
+        ).to(model.device)
         with torch.no_grad():
             out = model.generate(
                 **inputs,
@@ -189,6 +192,14 @@ def _run_inference_demo(model, tokenizer, n: int = 3):
     FastLanguageModel.for_training(model)
 
 
+def _export_gguf(model, tokenizer, output_dir: str = GGUF_DIR, quantization: str = "q4_k_m"):
+    """Merge LoRA adapter and export to GGUF for mobile deployment."""
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    print(f"\n─── GGUF export ({quantization}) → {output_dir} ───")
+    model.save_pretrained_gguf(output_dir, tokenizer, quantization_method=quantization)
+    print("GGUF export complete.")
+
+
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
 def run(config_overrides: dict | None = None) -> dict:
@@ -206,15 +217,16 @@ def run(config_overrides: dict | None = None) -> dict:
     dict
         stage1_adapter, stage2_adapter, stage1_eval_loss, stage2_eval_loss
     """
-    lora_cfg = DEFAULT_LORA_CONFIG
-    s1_cfg = DEFAULT_SFT_STAGE1_CONFIG
-    s2_cfg = DEFAULT_SFT_STAGE2_CONFIG
-    wb_cfg = DEFAULT_WANDB_CONFIG
+    lora_cfg = copy(DEFAULT_LORA_CONFIG)
+    s1_cfg = copy(DEFAULT_SFT_STAGE1_CONFIG)
+    s2_cfg = copy(DEFAULT_SFT_STAGE2_CONFIG)
+    wb_cfg = copy(DEFAULT_WANDB_CONFIG)
 
     stage = "both"
     if config_overrides:
         config_overrides = config_overrides.copy()  # avoid mutating caller's dict
         stage = config_overrides.pop("stage", "both")
+
         for k, v in config_overrides.items():
             for cfg in (lora_cfg, s1_cfg, s2_cfg, wb_cfg):
                 if hasattr(cfg, k):
@@ -223,7 +235,6 @@ def run(config_overrides: dict | None = None) -> dict:
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     results: dict = {}
-    from unsloth import unsloth_train  # Fixed gradient accumulation (https://unsloth.ai/blog/gradient)
 
     # ── Load datasets ─────────────────────────────────────────────────────────
     print("Loading training datasets from disk …")
@@ -305,6 +316,8 @@ def run(config_overrides: dict | None = None) -> dict:
 
         # Load from stage 1 adapter (or fresh base if stage 1 was skipped)
         s1_path = results.get("stage1_adapter", s1_cfg.output_dir)
+        if not results.get("stage1_adapter") and not (Path(s1_path) / "adapter_config.json").exists():
+            raise FileNotFoundError(f"Stage 1 adapter not found at {s1_path}. Run stage 1 first.")
         model, tokenizer = _load_model_and_tokenizer(lora_cfg, from_path=s1_path)
 
         s2_train = filter_by_source(full_train_ds, domain_sources)
@@ -331,6 +344,7 @@ def run(config_overrides: dict | None = None) -> dict:
         print(f"Stage 2 adapter saved → {s2_cfg.output_dir}")
 
         _run_inference_demo(model, tokenizer)
+        _export_gguf(model, tokenizer)
 
         if wandb.run is not None:
             wandb.log({"stage2_eval_loss": s2_eval_loss})
@@ -338,6 +352,7 @@ def run(config_overrides: dict | None = None) -> dict:
 
         results["stage2_adapter"] = s2_cfg.output_dir
         results["stage2_eval_loss"] = s2_eval_loss
+        results["gguf_dir"] = GGUF_DIR
 
     print("\nSFT training complete.")
     print(results)
