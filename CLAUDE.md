@@ -133,6 +133,15 @@ has_advice("You should try meditation.")  # True
 has_advice("That sounds really hard.")    # False
 ```
 
+## Blog Notes
+
+Two files track the project story for future blog posts:
+
+- **FINETUNE_BLOG_NOTES.md** — fine-tuning journey (data, training, bugs, experiments)
+- **VASTAI_BLOG_NOTES.md** — Vast.ai infrastructure setup
+
+When a user request results in a meaningful change (new feature, bug fix, architecture decision, or lesson learned), append a concise entry to the relevant blog notes file. Skip trivial renames or formatting-only changes.
+
 ## Dependencies
 
 Install in Colab (done automatically by notebooks):
