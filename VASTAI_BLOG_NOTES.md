@@ -54,6 +54,37 @@ Added a "run and self-destruct" workflow for unattended training:
 
 For headless: also set `EMOTWEN_HEADLESS=true`, `EMOTWEN_STAGE=full_train`, optionally `EMOTWEN_OVERRIDES="key=val"`.
 
+## 7. Local launch scripts
+
+Tired of copy-pasting env vars into the vast.ai web UI. Built two CLI scripts:
+
+**`scripts/vastai-launch.sh`** — generic launcher, reusable by any project:
+- Searches for cheapest offer matching a GPU query
+- Creates instance with env vars (inline `--env` or `--env-file`)
+- Supports `--dry-run` to preview without creating
+
+**`scripts/emotwen-launch.sh`** — EmotWen wrapper:
+- Sets all EmotWen defaults (provisioning URL, stage, branch)
+- Passes API keys from local environment automatically
+- `--interactive` for SSH+Jupyter, headless by default
+- `--cloud-sync CONNECTION_ID:PATH` for data persistence
+
+One-liner to launch a training run from your laptop:
+```bash
+export WANDB_API_KEY=xxx
+./scripts/emotwen-launch.sh --stage full_train --cloud-sync 52:/emotwen
+```
+
+## 8. Cloud sync
+
+Added cloud sync to the provisioning script so outputs persist between runs:
+- Before headless job: `vastai copy` downloads previous `outputs/` and `data/` from cloud storage
+- After headless job: uploads results back before self-destructing
+- Uses vast.ai's cloud copy with connection IDs (configured in account settings for S3/GDrive/Backblaze/Dropbox)
+- Needs `VAST_API_KEY` (full key) since `CONTAINER_API_KEY` may lack cloud copy permissions
+
+This closes the loop: fire-and-forget runs that save results to cloud, and subsequent runs that resume from where the last one left off.
+
 ---
 
 ## What's next

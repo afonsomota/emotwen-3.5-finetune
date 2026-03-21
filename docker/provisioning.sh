@@ -19,13 +19,20 @@
 #        EMOTWEN_STAGE=full_train       (or: full_train_with_gen, generate, data_prep, sft, eval, grpo)
 #        EMOTWEN_OVERRIDES="key=val"    (optional, space-separated)
 #
+#   For cloud sync (restore outputs before job, save after):
+#        CLOUD_SYNC_CONNECTION=52       (connection ID from vast.ai account)
+#        CLOUD_SYNC_PATH=/emotwen       (remote path in cloud storage)
+#        VAST_API_KEY=...               (full API key — CONTAINER_API_KEY may lack permissions)
+#        CLOUD_SYNC_DIRS="outputs data" (optional, default: "outputs data")
+#
 #   3. Launch mode: Jupyter + SSH (recommended for interactive use)
 #
 # ── What this script does ──────────────────────────────────────────────────
 #
 #   - Installs Unsloth, TRL, and other deps not in the PyTorch template
 #   - Clones the repo into /workspace/emotwen-3.5-finetune
-#   - Optionally runs the full pipeline and self-destructs (headless mode)
+#   - Syncs outputs/data from cloud storage (if CLOUD_SYNC_CONNECTION is set)
+#   - Optionally runs the full pipeline, syncs results back, and self-destructs
 #
 # This runs once on first boot (vast.ai touches /.provisioning_complete).
 
@@ -94,7 +101,52 @@ echo "  Usage:  cd $REPO_DIR && python main.py <stage>"
 echo "  Stages: generate | data_prep | sft | eval | grpo | full_train | full_train_with_gen"
 echo "════════════════════════════════════════════════════════════"
 
-# ── Headless mode: run pipeline + self-destruct ─────────────────────────────
+# ── Cloud sync helpers ───────────────────────────────────────────────────────
+# Uses `vastai copy` with the structured path format:
+#   vastai copy s3.CONNECTION:PATH C.INSTANCE:PATH   (download)
+#   vastai copy C.INSTANCE:PATH s3.CONNECTION:PATH   (upload)
+# The provider prefix (s3, drive, backblaze, dropbox) is auto-detected by
+# vast.ai from the connection ID, so we omit it and use the generic format.
+
+cloud_sync_api_key() {
+    # Prefer full API key; fall back to container key
+    echo "${VAST_API_KEY:-${CONTAINER_API_KEY:-}}"
+}
+
+cloud_sync_down() {
+    local api_key; api_key=$(cloud_sync_api_key)
+    if [ -z "$api_key" ] || [ -z "${CLOUD_SYNC_CONNECTION:-}" ]; then return; fi
+
+    local dirs="${CLOUD_SYNC_DIRS:-outputs data}"
+    echo "[cloud-sync] Downloading from connection=$CLOUD_SYNC_CONNECTION path=$CLOUD_SYNC_PATH ..."
+
+    for dir in $dirs; do
+        echo "[cloud-sync]   ↓ $CLOUD_SYNC_PATH/$dir/ → $REPO_DIR/$dir/"
+        mkdir -p "$REPO_DIR/$dir"
+        vastai copy "${CLOUD_SYNC_CONNECTION}:${CLOUD_SYNC_PATH}/${dir}/" \
+            "C.${CONTAINER_ID}:${REPO_DIR}/${dir}/" \
+            --api-key "$api_key" 2>&1 || echo "[cloud-sync]   (no remote data for $dir, skipping)"
+    done
+}
+
+cloud_sync_up() {
+    local api_key; api_key=$(cloud_sync_api_key)
+    if [ -z "$api_key" ] || [ -z "${CLOUD_SYNC_CONNECTION:-}" ]; then return; fi
+
+    local dirs="${CLOUD_SYNC_DIRS:-outputs data}"
+    echo "[cloud-sync] Uploading to connection=$CLOUD_SYNC_CONNECTION path=$CLOUD_SYNC_PATH ..."
+
+    for dir in $dirs; do
+        if [ -d "$REPO_DIR/$dir" ] && [ "$(ls -A "$REPO_DIR/$dir" 2>/dev/null)" ]; then
+            echo "[cloud-sync]   ↑ $REPO_DIR/$dir/ → $CLOUD_SYNC_PATH/$dir/"
+            vastai copy "C.${CONTAINER_ID}:${REPO_DIR}/${dir}/" \
+                "${CLOUD_SYNC_CONNECTION}:${CLOUD_SYNC_PATH}/${dir}/" \
+                --api-key "$api_key" 2>&1 || echo "[cloud-sync]   WARNING: upload failed for $dir"
+        fi
+    done
+}
+
+# ── Headless mode: sync → run → sync → self-destruct ────────────────────────
 if [ "${EMOTWEN_HEADLESS:-false}" = "true" ]; then
     STAGE="${EMOTWEN_STAGE:-full_train}"
     echo ""
@@ -102,15 +154,23 @@ if [ "${EMOTWEN_HEADLESS:-false}" = "true" ]; then
     echo "  Headless mode: running stage '$STAGE'"
     echo "════════════════════════════════════════════════════════════"
 
+    # Restore previous outputs from cloud storage
+    cloud_sync_down
+
     cd "$REPO_DIR"
     # shellcheck disable=SC2086
     python main.py "$STAGE" ${EMOTWEN_OVERRIDES:-}
 
     echo ""
-    echo "[headless] Pipeline complete. Destroying instance..."
+    echo "[headless] Pipeline complete."
+
+    # Save results to cloud storage
+    cloud_sync_up
 
     # Give W&B a moment to finish uploading
     sleep 10
+
+    echo "[headless] Destroying instance..."
 
     # Self-destruct — CONTAINER_ID and CONTAINER_API_KEY are set by vast.ai
     if [ -n "$CONTAINER_ID" ] && [ -n "$CONTAINER_API_KEY" ]; then
