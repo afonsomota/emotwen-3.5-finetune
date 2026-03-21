@@ -16,7 +16,7 @@
 #
 #   For headless "run + terminate" mode, also set:
 #        EMOTWEN_HEADLESS=true
-#        EMOTWEN_STAGE=all              (or: all_no_gen, generate, data_prep, sft, eval, grpo)
+#        EMOTWEN_STAGE=full_train       (or: full_train_with_gen, generate, data_prep, sft, eval, grpo)
 #        EMOTWEN_OVERRIDES="key=val"    (optional, space-separated)
 #
 #   3. Launch mode: Jupyter + SSH (recommended for interactive use)
@@ -91,12 +91,12 @@ echo "════════════════════════�
 echo "  Provisioning complete!"
 echo "  Repo:   $REPO_DIR"
 echo "  Usage:  cd $REPO_DIR && python main.py <stage>"
-echo "  Stages: generate | data_prep | sft | eval | grpo | all | all_no_gen"
+echo "  Stages: generate | data_prep | sft | eval | grpo | full_train | full_train_with_gen"
 echo "════════════════════════════════════════════════════════════"
 
 # ── Headless mode: run pipeline + self-destruct ─────────────────────────────
 if [ "${EMOTWEN_HEADLESS:-false}" = "true" ]; then
-    STAGE="${EMOTWEN_STAGE:-all}"
+    STAGE="${EMOTWEN_STAGE:-full_train}"
     echo ""
     echo "════════════════════════════════════════════════════════════"
     echo "  Headless mode: running stage '$STAGE'"
