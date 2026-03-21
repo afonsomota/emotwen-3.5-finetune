@@ -141,7 +141,7 @@ Use `scripts/emotwen-launch.sh` to launch training runs on Vast.ai. It wraps the
 ```bash
 export WANDB_API_KEY=xxx          # required
 export HF_TOKEN=xxx               # optional (private datasets)
-export VAST_API_KEY=xxx            # required for --cloud-sync
+export VAST_API_KEY=xxx            # needed for --cloud-sync (warns if missing)
 ```
 
 **Headless training (default):**
