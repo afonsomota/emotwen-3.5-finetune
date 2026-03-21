@@ -754,68 +754,79 @@ def run(config_overrides: dict | None = None) -> dict:
     advice_filtered_dd = len(dd_train) - len(dd_convs_raw)
     print(f"    daily_dialog: {len(dd_convs_raw)} conversations kept")
 
-    # ── go_emotions (build RAG pool first, then synthetic pairs) ─────────────
-    print("  go_emotions")
-    ge_ds = load_dataset(cfg.go_emotions_id, cfg.go_emotions_config)
-    ge_train = list(ge_ds["train"])
-    label_feature = ge_ds["train"].features["labels"].feature
-
-    # Build RAG pool: label_name → list of texts
-    rag_pool: dict[str, list[str]] = {}
-    for row in ge_train:
-        for lid in row["labels"]:
-            lname = label_feature.int2str(lid)
-            rag_pool.setdefault(lname, []).append(row["text"])
-
-    rng.shuffle(ge_train)
-    if cfg.max_go_emotions_synthetic:
-        ge_train = ge_train[: cfg.max_go_emotions_synthetic]
-    ge_convs = _go_emotions_to_messages(
-        ge_train, SYSTEM_PROMPT_BASE, SYSTEM_PROMPT_RAG,
-        cfg.rag_injection_fraction, rag_pool, rng,
-        label_feature=label_feature,
-    )
-    print(f"    go_emotions synthetic: {len(ge_convs)} conversations")
-
-    # ── dair-ai/emotion ───────────────────────────────────────────────────────
-    print("  dair-ai/emotion")
-    em_ds = load_dataset(cfg.dair_emotion_id)
-    em_train = list(em_ds["train"])
-    rng.shuffle(em_train)
-    em_convs = _dair_emotion_to_messages(em_train[:2000], SYSTEM_PROMPT_BASE, rng)
-    print(f"    dair emotion synthetic: {len(em_convs)} conversations")
-
-    # ── counsel-chat ──────────────────────────────────────────────────────────
-    print("  counsel-chat")
-    cc_ds = load_dataset(cfg.counsel_chat_id)
-    cc_train = list(cc_ds["train"])
-    rng.shuffle(cc_train)
-    if cfg.max_counsel_chat:
-        cc_train = cc_train[: cfg.max_counsel_chat]
-    cc_convs = _counsel_chat_to_messages(cc_train, SYSTEM_PROMPT_BASE, rng)
-    print(f"    counsel-chat synthetic: {len(cc_convs)} conversations")
-
-    # ── Let me explain exemplars ──────────────────────────────────────────────
+    # ── Synthetic data: load from HF Hub or generate inline ─────────────────
     lme_convs = _let_me_explain_conversations(SYSTEM_PROMPT_BASE)
     print(f"    'Let me explain:' exemplars: {len(lme_convs)}")
 
-    # ── Extend synthetic single-turn → multi-turn ─────────────────────────────
-    mt_fraction = cfg.multi_turn_extension_fraction
-    mt_sources = ge_convs + em_convs  # single-turn synthetic sources with emotion labels
-    rng.shuffle(mt_sources)
-    n_to_extend = int(len(mt_sources) * mt_fraction)
-    multi_turn_convs = []
-    for conv in mt_sources[:n_to_extend]:
-        label = conv.get("emotion_label", "neutral")
-        extended = _extend_to_multi_turn(conv, label, rng)
-        if extended is not None:
-            multi_turn_convs.append(extended)
-    print(f"\n    Multi-turn extensions: {len(multi_turn_convs)} "
-          f"(from {n_to_extend} candidates, {mt_fraction:.0%} of synthetic)")
+    if cfg.synthetic_hub_id:
+        # ── Load pre-generated synthetic conversations from HF Hub ────────
+        print(f"\n  Loading pre-generated synthetic data from: {cfg.synthetic_hub_id}")
+        syn_ds = load_dataset(cfg.synthetic_hub_id)
+        syn_train = list(syn_ds["train"])
+        synthetic_convs = [
+            {"messages": row["messages"], "source": row["source"]}
+            for row in syn_train
+        ]
+        print(f"    Loaded {len(synthetic_convs)} synthetic conversations from Hub")
+    else:
+        # ── Inline generation fallback (original path) ────────────────────
+        print("\n  No synthetic_hub_id set — generating inline …")
+
+        print("  go_emotions")
+        ge_ds = load_dataset(cfg.go_emotions_id, cfg.go_emotions_config)
+        ge_train = list(ge_ds["train"])
+        label_feature = ge_ds["train"].features["labels"].feature
+
+        rag_pool: dict[str, list[str]] = {}
+        for row in ge_train:
+            for lid in row["labels"]:
+                lname = label_feature.int2str(lid)
+                rag_pool.setdefault(lname, []).append(row["text"])
+
+        rng.shuffle(ge_train)
+        if cfg.max_go_emotions_synthetic:
+            ge_train = ge_train[: cfg.max_go_emotions_synthetic]
+        ge_convs = _go_emotions_to_messages(
+            ge_train, SYSTEM_PROMPT_BASE, SYSTEM_PROMPT_RAG,
+            cfg.rag_injection_fraction, rag_pool, rng,
+            label_feature=label_feature,
+        )
+        print(f"    go_emotions synthetic: {len(ge_convs)} conversations")
+
+        print("  dair-ai/emotion")
+        em_ds = load_dataset(cfg.dair_emotion_id)
+        em_train = list(em_ds["train"])
+        rng.shuffle(em_train)
+        em_convs = _dair_emotion_to_messages(em_train[:2000], SYSTEM_PROMPT_BASE, rng)
+        print(f"    dair emotion synthetic: {len(em_convs)} conversations")
+
+        print("  counsel-chat")
+        cc_ds = load_dataset(cfg.counsel_chat_id)
+        cc_train = list(cc_ds["train"])
+        rng.shuffle(cc_train)
+        if cfg.max_counsel_chat:
+            cc_train = cc_train[: cfg.max_counsel_chat]
+        cc_convs = _counsel_chat_to_messages(cc_train, SYSTEM_PROMPT_BASE, rng)
+        print(f"    counsel-chat synthetic: {len(cc_convs)} conversations")
+
+        # Extend single-turn → multi-turn
+        mt_fraction = cfg.multi_turn_extension_fraction
+        mt_sources = ge_convs + em_convs
+        rng.shuffle(mt_sources)
+        n_to_extend = int(len(mt_sources) * mt_fraction)
+        multi_turn_convs = []
+        for conv in mt_sources[:n_to_extend]:
+            label = conv.get("emotion_label", "neutral")
+            extended = _extend_to_multi_turn(conv, label, rng)
+            if extended is not None:
+                multi_turn_convs.append(extended)
+        print(f"\n    Multi-turn extensions: {len(multi_turn_convs)} "
+              f"(from {n_to_extend} candidates, {mt_fraction:.0%} of synthetic)")
+
+        synthetic_convs = ge_convs + em_convs + cc_convs + multi_turn_convs
 
     # ── Combine all ───────────────────────────────────────────────────────────
-    all_convs = (ed_convs_raw + dd_convs_raw + ge_convs + em_convs
-                 + cc_convs + lme_convs + multi_turn_convs)
+    all_convs = ed_convs_raw + dd_convs_raw + lme_convs + synthetic_convs
     rng.shuffle(all_convs)
 
     sources = {}

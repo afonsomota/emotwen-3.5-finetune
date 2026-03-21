@@ -106,7 +106,13 @@ class DataConfig:
     max_counsel_chat: int = 2000
 
     # Fraction of synthetic single-turn examples to extend to multi-turn
+    # (used only when synthetic_hub_id is None — i.e. inline generation fallback)
     multi_turn_extension_fraction: float = 0.50
+
+    # Pre-generated synthetic dataset on HF Hub (from generate_multi_turn.py).
+    # When set, data_prep loads this instead of generating synthetic data inline.
+    # Set to None to fall back to inline generation.
+    synthetic_hub_id: str | None = "brianist/emotwen-3.5-synthetic"
 
     train_split: float = 0.90
     eval_holdout_size: int = 200
@@ -252,6 +258,38 @@ class GRPOTrainConfig:
     # Number of prompts to use for GRPO training
     n_grpo_prompts: int = 400
 
+# ─── Multi-turn generation config ────────────────────────────────────────────
+
+@dataclass
+class GenerateMultiTurnConfig:
+    """Config for the standalone multi-turn conversation generator."""
+    # HF Hub dataset to push generated conversations to
+    hub_repo_id: str = "brianist/emotwen-3.5-synthetic"
+
+    # Source datasets to draw seed examples from
+    go_emotions_id: str = "google-research-datasets/go_emotions"
+    go_emotions_config: str = "simplified"
+    dair_emotion_id: str = "dair-ai/emotion"
+    counsel_chat_id: str = "nbertagnolli/counsel-chat"
+
+    # How many seed examples to use from each source
+    max_go_emotions: int = 5000
+    max_dair_emotion: int = 2000
+    max_counsel_chat: int = 2000
+
+    # Fraction of single-turn examples to extend to multi-turn via templates
+    template_extension_fraction: float = 0.50
+
+    # RAG injection (applied to single-turn examples before extension)
+    rag_injection_fraction: float = 0.30
+
+    # Whether to push to HF Hub (set False to only save locally)
+    push_to_hub: bool = True
+    # Local save path (always saved here regardless of push_to_hub)
+    local_save_dir: str = str(DATA_DIR / "synthetic_multi_turn")
+
+    random_seed: int = 42
+
 # ─── W&B config ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -271,4 +309,5 @@ DEFAULT_EVAL_CONFIG = EvalConfig()
 DEFAULT_MULTI_TURN_EVAL_CONFIG = MultiTurnEvalConfig()
 DEFAULT_GRPO_LORA_CONFIG = GRPOLoraConfig()
 DEFAULT_GRPO_TRAIN_CONFIG = GRPOTrainConfig()
+DEFAULT_GENERATE_MT_CONFIG = GenerateMultiTurnConfig()
 DEFAULT_WANDB_CONFIG = WandbConfig()

@@ -7,12 +7,14 @@ Fine-tunes **Qwen 3.5 (0.8B)** into an empathetic journal companion chatbot (Emo
 ## Architecture
 
 ```
-Raw Datasets (HuggingFace Hub)
-    ↓ src/data_prep.py
+Seed Datasets (HuggingFace Hub)
+    ↓ src/generate_multi_turn.py   (run once, or when regenerating)
+HF Hub: brianist/emotwen-3.5-synthetic
+    ↓ src/data_prep.py             (loads synthetic from Hub + real datasets)
 data/sft_train, sft_val, eval_200
     ↓ src/train_sft.py  (Stage 1: tone, Stage 2: journal domain)
 outputs/sft_stage2/
-    ↓ src/evaluate.py
+    ↓ src/evaluate.py   (includes multi-turn eval)
     → if >15% responses exceed 5 sentences → trigger GRPO
     ↓ src/train_grpo.py  (optional)
 outputs/final_merged/  (16-bit merged, ready for deployment)
@@ -26,30 +28,36 @@ All stages are Colab notebooks. Run them in order:
 
 | Notebook | Stage | GPU needed |
 |---|---|---|
-| `nb/01_data_prep.ipynb` | Data preparation | No (CPU) |
+| `nb/00_generate_multi_turn.ipynb` | Synthetic multi-turn generation → HF Hub | No (CPU) |
+| `nb/01_data_prep.ipynb` | Data preparation (loads synthetic from Hub) | No (CPU) |
 | `nb/02_sft_train.ipynb` | SFT Stage 1 + 2 | Yes (T4+) |
-| `nb/03_eval.ipynb` | Evaluation + GRPO decision | Yes |
+| `nb/03_eval.ipynb` | Evaluation + multi-turn eval + GRPO decision | Yes |
 | `nb/04_grpo.ipynb` | GRPO (if triggered) | Yes |
+
+> **Note:** Step 00 only needs to be re-run when you change templates, seed counts, or generation strategy. The published HF dataset is reused across data prep runs.
 
 ## Source Layout
 
 ```
 src/
-  config.py       # All hyperparams, system prompts, dataset IDs — edit here first
-  data_prep.py    # Dataset loading, filtering, synthesis
-  train_sft.py    # Two-stage supervised fine-tuning
-  train_grpo.py   # GRPO reinforcement learning
-  evaluate.py     # Multi-metric evaluation + LLM judge
-  utils.py        # Shared: sentence counter, advice detector, GRPO rewards
+  config.py              # All hyperparams, system prompts, dataset IDs — edit here first
+  generate_multi_turn.py # Standalone synthetic multi-turn generator → HF Hub
+  data_prep.py           # Dataset loading, filtering, mixing (loads synthetic from Hub)
+  train_sft.py           # Two-stage supervised fine-tuning
+  train_grpo.py          # GRPO reinforcement learning
+  evaluate.py            # Multi-metric evaluation + multi-turn eval + LLM judge
+  utils.py               # Shared: sentence counter, advice detector, GRPO rewards, self-BLEU
 ```
 
 ## Configuration
 
 Everything is in `src/config.py`. Key dataclasses:
 
-- `DataConfig` — dataset IDs, max samples per source, RAG fraction
+- `GenerateMultiTurnConfig` — HF Hub repo, seed dataset sizes, extension fraction
+- `DataConfig` — dataset IDs, max samples per source, RAG fraction, `synthetic_hub_id`
 - `SFTStage1Config` / `SFTStage2Config` — LR, steps, batch size per stage
 - `EvalConfig` — temperature, LLM judge model
+- `MultiTurnEvalConfig` — turns, conversations, self-BLEU/relevance thresholds
 - `GRPOTrainConfig` — KL penalty (beta), generation count, reward weights
 - `WandbConfig` — project/run name, entity
 
