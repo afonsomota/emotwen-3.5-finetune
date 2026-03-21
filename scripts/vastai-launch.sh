@@ -12,9 +12,11 @@
 #   --disk DISK            Disk space in GB (default: 50)
 #   --env KEY=VAL          Environment variable (repeatable)
 #   --env-file FILE        Load KEY=VAL lines from file (skips blanks and #comments)
-#   --sync CONN:SRC:DST    Cloud sync mount (repeatable, like -v in Docker).
-#                          Before the job, copies CONN:SRC → DST on the instance.
-#                          After the job, copies DST → CONN:SRC back.
+#   --sync CONN:SRC:DST[:MODE]  Cloud sync mount (repeatable, like -v in Docker).
+#                          MODE controls sync direction (default: rw):
+#                            rw   — download before + upload after (bidirectional)
+#                            down — download before only (input data, weights)
+#                            up   — upload after only (fresh outputs)
 #                          CONN = vast.ai cloud connection ID (from account page)
 #                          SRC  = path in cloud storage
 #                          DST  = absolute path on the instance
@@ -40,10 +42,11 @@
 #     --env PROVISIONING_SCRIPT=https://example.com/setup.sh \
 #     --env WANDB_API_KEY=xxx
 #
-#   # With cloud sync (persist outputs and data dirs)
+#   # With cloud sync (persist outputs, read-only data)
 #   ./vastai-launch.sh \
-#     --sync 52:/myproject/outputs:/workspace/myproject/outputs \
-#     --sync 52:/myproject/data:/workspace/myproject/data \
+#     --sync 52:/myproject/outputs:/workspace/myproject/outputs:up \
+#     --sync 52:/myproject/data:/workspace/myproject/data:down \
+#     --sync 52:/myproject/checkpoints:/workspace/myproject/checkpoints \
 #     --env PROVISIONING_SCRIPT=https://example.com/setup.sh
 
 set -euo pipefail
@@ -83,16 +86,22 @@ while [[ $# -gt 0 ]]; do
             done < "$2"
             shift 2 ;;
         --sync)
-            # Validate format: CONN:SRC:DST
-            if [[ ! "$2" =~ ^[^:]+:[^:]+:.+$ ]]; then
-                echo "Error: --sync must be CONNECTION:REMOTE_PATH:INSTANCE_PATH" >&2
-                echo "  e.g. 52:/myproject/outputs:/workspace/myproject/outputs" >&2
+            # Validate format: CONN:SRC:DST[:MODE]
+            if [[ ! "$2" =~ ^[^:]+:[^:]+:[^:]+(:(rw|down|up))?$ ]]; then
+                echo "Error: --sync must be CONN:REMOTE:LOCAL[:MODE]" >&2
+                echo "  MODE = rw (default), down, or up" >&2
+                echo "  e.g. 52:/myproject/outputs:/workspace/outputs:up" >&2
                 exit 1
             fi
-            SYNC_MOUNTS+=("$2")
+            # Append default mode if not specified
+            mount="$2"
+            if [[ ! "$mount" =~ :(rw|down|up)$ ]]; then
+                mount="$mount:rw"
+            fi
+            SYNC_MOUNTS+=("$mount")
             shift 2 ;;
         -h|--help)
-            head -46 "$0" | tail -n +2 | sed 's/^# \?//'
+            head -49 "$0" | tail -n +2 | sed 's/^# \?//'
             exit 0 ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
@@ -100,8 +109,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Pack sync mounts into env var ────────────────────────────────────────────
-# Format: pipe-separated list of CONN:SRC:DST entries
-# The provisioning script on the instance parses this to sync before/after jobs.
+# Format: pipe-separated list of CONN:SRC:DST:MODE entries
+# MODE = rw|down|up. The provisioning script parses this to sync before/after.
 if [[ ${#SYNC_MOUNTS[@]} -gt 0 ]]; then
     MOUNTS_STR=$(IFS='|'; echo "${SYNC_MOUNTS[*]}")
     ENV_PAIRS+=("CLOUD_SYNC_MOUNTS=$MOUNTS_STR")
@@ -166,8 +175,13 @@ if $DRY_RUN; then
         echo ""
         echo "[dry-run] Cloud sync mounts:"
         for mount in "${SYNC_MOUNTS[@]}"; do
-            IFS=':' read -r conn src dst <<< "$mount"
-            echo "  $conn:$src ↔ $dst"
+            IFS=':' read -r conn src dst mode <<< "$mount"
+            case "$mode" in
+                down) arrow="→" ;;
+                up)   arrow="←" ;;
+                *)    arrow="↔" ;;
+            esac
+            echo "  $conn:$src $arrow $dst  ($mode)"
         done
     fi
     exit 0
@@ -195,8 +209,13 @@ if [[ ${#SYNC_MOUNTS[@]} -gt 0 ]]; then
     echo ""
     echo "  Cloud sync mounts:"
     for mount in "${SYNC_MOUNTS[@]}"; do
-        IFS=':' read -r conn src dst <<< "$mount"
-        echo "    $conn:$src ↔ $dst"
+        IFS=':' read -r conn src dst mode <<< "$mount"
+        case "$mode" in
+            down) arrow="→" ;;
+            up)   arrow="←" ;;
+            *)    arrow="↔" ;;
+        esac
+        echo "    $conn:$src $arrow $dst  ($mode)"
     done
 fi
 echo "════════════════════════════════════════════════════════════"
