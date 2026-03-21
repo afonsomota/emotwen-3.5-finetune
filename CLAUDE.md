@@ -133,6 +133,49 @@ has_advice("You should try meditation.")  # True
 has_advice("That sounds really hard.")    # False
 ```
 
+## Launching on Vast.ai
+
+Use `scripts/emotwen-launch.sh` to launch training runs on Vast.ai. It wraps the generic `vastai-launch.sh` with EmotWen defaults (provisioning script, repo clone, API key forwarding).
+
+**Prerequisites:** Set API keys in the environment or a `.env` file in the project root:
+```bash
+export WANDB_API_KEY=xxx          # required
+export HF_TOKEN=xxx               # optional (private datasets)
+export VAST_API_KEY=xxx            # required for --cloud-sync
+```
+
+**Headless training (default):**
+```bash
+./scripts/emotwen-launch.sh --stage full_train
+```
+
+**Interactive Jupyter+SSH session:**
+```bash
+./scripts/emotwen-launch.sh --interactive --gpu 'gpu_name=A100_SXM4 num_gpus=1' --max-price 3.0
+```
+
+**With cloud sync and config overrides:**
+```bash
+./scripts/emotwen-launch.sh --stage full_train \
+  --cloud-sync 52:/emotwen \
+  --overrides "max_empathetic=5000 stage1_max_steps=500"
+```
+
+**Available stages:** `generate`, `data_prep`, `sft`, `eval`, `grpo`, `full_train`, `full_train_with_gen`
+
+**Key flags:**
+| Flag | Purpose |
+|---|---|
+| `--stage STAGE` | Pipeline stage to run (default: `full_train`) |
+| `--branch BRANCH` | Git branch to clone on the instance (default: `main`) |
+| `--cloud-sync CONN:PATH` | Persist outputs/data via Vast.ai cloud storage |
+| `--overrides "K=V ..."` | Config overrides passed to the pipeline |
+| `--gpu QUERY` | Vast.ai GPU search query |
+| `--max-price PRICE` | Max $/hr bid |
+| `--dry-run` | Print the launch command without executing |
+
+Run `./scripts/emotwen-launch.sh --help` for the full option list.
+
 ## Blog Notes
 
 Two files track the project story for future blog posts:
