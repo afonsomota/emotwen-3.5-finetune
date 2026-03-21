@@ -35,11 +35,19 @@ from src.config import (
     LOAD_IN_4BIT,
     SYSTEM_PROMPT_BASE,
     DEFAULT_EVAL_CONFIG,
+    DEFAULT_MULTI_TURN_EVAL_CONFIG,
     DEFAULT_WANDB_CONFIG,
     EvalConfig,
+    MultiTurnEvalConfig,
     WandbConfig,
 )
-from src.utils import count_sentences, has_advice
+from src.utils import (
+    count_sentences,
+    has_advice,
+    pairwise_self_bleu,
+    exact_repeat_check,
+    longest_common_substring_tokens,
+)
 
 
 # ─── LLM-as-judge ─────────────────────────────────────────────────────────────
@@ -291,6 +299,275 @@ def _compute_perplexity(
     return total_nll / total_tokens if total_tokens > 0 else float("nan")
 
 
+# ─── Multi-turn evaluation ────────────────────────────────────────────────────
+
+# Generic follow-up prompts used when the eval example has fewer user turns
+# than the number of turns we want to simulate. These are deliberately
+# low-information so the model must rely on prior context.
+_FOLLOWUP_POOL = [
+    "Yeah, exactly.",
+    "There's more to it, actually…",
+    "I hadn't thought about it that way.",
+    "That's part of it, but I think what really bothers me is something deeper.",
+    "Hmm, can you say more about that?",
+    "I'm not sure I agree, but I don't know why.",
+    "It reminded me of something from a while ago.",
+    "I guess I've been avoiding thinking about it.",
+    "I feel like you understand, but I still feel stuck.",
+    "That question is hard. Let me think…",
+    "I don't know. I just feel heavy today.",
+    "It's weird — I feel better just writing about it.",
+    "I keep going back and forth on how I feel about it.",
+    "No one else really gets this.",
+    "What do you think it means that I keep coming back to this?",
+]
+
+
+def _load_embedding_model(model_name: str):
+    """Load a sentence-transformers model for contextual relevance scoring."""
+    try:
+        from sentence_transformers import SentenceTransformer
+        return SentenceTransformer(model_name)
+    except ImportError:
+        print("[multi-turn] sentence-transformers not installed — contextual relevance will be skipped")
+        return None
+
+
+def _cosine_similarity(a, b) -> float:
+    """Cosine similarity between two numpy vectors."""
+    import numpy as np
+    dot = np.dot(a, b)
+    norm = np.linalg.norm(a) * np.linalg.norm(b)
+    return float(dot / norm) if norm > 0 else 0.0
+
+
+def eval_multi_turn(
+    model,
+    tokenizer,
+    eval_ds,
+    mt_cfg: MultiTurnEvalConfig,
+    rng=None,
+) -> dict:
+    """
+    Simulate multi-turn conversations and measure repetition + context drift.
+
+    For each eval example:
+      1. Start with system + first user turn
+      2. Generate assistant response (fed back into context)
+      3. Append next user turn (from data or synthetic follow-up)
+      4. Repeat up to mt_cfg.n_turns assistant responses
+
+    Returns
+    -------
+    dict with summary metrics and per-conversation detail rows.
+    """
+    import random as _random
+    import numpy as np
+
+    if rng is None:
+        rng = _random.Random(42)
+
+    from unsloth import FastLanguageModel
+    FastLanguageModel.for_inference(model)
+    device = next(model.parameters()).device
+
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Load embedding model for contextual relevance
+    embed_model = _load_embedding_model(mt_cfg.embedding_model)
+
+    n = min(mt_cfg.n_conversations, len(eval_ds))
+    examples = list(eval_ds.select(range(n)))
+
+    # ── Run multi-turn conversations ──────────────────────────────────────────
+    all_conversations = []  # list of dicts, one per conversation
+
+    for conv_idx, example in enumerate(tqdm(examples, desc="Multi-turn eval")):
+        msgs = example["messages"]
+
+        # Extract user turns from the original data
+        original_user_turns = [m["content"] for m in msgs if m["role"] == "user"]
+        system_msg = next((m for m in msgs if m["role"] == "system"), None)
+        if system_msg is None:
+            system_msg = {"role": "system", "content": SYSTEM_PROMPT_BASE}
+
+        # Build initial context
+        context = [system_msg]
+
+        assistant_turns: list[str] = []
+        user_turns_used: list[str] = []
+        turn_details: list[dict] = []
+
+        for turn_idx in range(mt_cfg.n_turns):
+            # Pick user message: use original data if available, else synthetic
+            if turn_idx < len(original_user_turns):
+                user_msg = original_user_turns[turn_idx]
+            else:
+                user_msg = rng.choice(_FOLLOWUP_POOL)
+
+            context.append({"role": "user", "content": user_msg})
+            user_turns_used.append(user_msg)
+
+            # Generate assistant response
+            prompt_text = tokenizer.apply_chat_template(
+                context, add_generation_prompt=True, tokenize=False
+            )
+            inputs = tokenizer(
+                prompt_text, truncation=True,
+                max_length=MAX_SEQ_LENGTH, return_tensors="pt"
+            ).to(device)
+            input_len = inputs["input_ids"].shape[1]
+
+            with torch.no_grad():
+                out = model.generate(
+                    **inputs,
+                    max_new_tokens=mt_cfg.max_new_tokens,
+                    temperature=mt_cfg.temperature,
+                    top_p=mt_cfg.top_p,
+                    do_sample=True,
+                    use_cache=True,
+                )
+
+            response = tokenizer.decode(
+                out[0][input_len:], skip_special_tokens=True
+            ).strip()
+
+            # Append to context for next turn
+            context.append({"role": "assistant", "content": response})
+            assistant_turns.append(response)
+
+            # Per-turn metrics
+            detail = {
+                "conversation_id": conv_idx,
+                "turn": turn_idx + 1,
+                "user_msg": user_msg,
+                "response": response,
+                "n_sentences": count_sentences(response)[0],
+                "has_advice": has_advice(response),
+            }
+
+            # Self-BLEU against previous turn
+            if turn_idx > 0:
+                detail["self_bleu_vs_prev"] = pairwise_self_bleu(
+                    [assistant_turns[-2], assistant_turns[-1]]
+                )["max_self_bleu"]
+            else:
+                detail["self_bleu_vs_prev"] = 0.0
+
+            # Exact substring repetition against all prior turns
+            if turn_idx > 0:
+                detail["exact_repeat"] = exact_repeat_check(
+                    response, assistant_turns[:-1], mt_cfg.lcs_token_threshold
+                )
+                detail["lcs_tokens"] = max(
+                    longest_common_substring_tokens(response, prior)
+                    for prior in assistant_turns[:-1]
+                )
+            else:
+                detail["exact_repeat"] = False
+                detail["lcs_tokens"] = 0
+
+            # Contextual relevance
+            if embed_model is not None:
+                emb = embed_model.encode([user_msg, response])
+                detail["context_relevance"] = _cosine_similarity(emb[0], emb[1])
+            else:
+                detail["context_relevance"] = float("nan")
+
+            turn_details.append(detail)
+
+        # Per-conversation summary
+        bleu_info = pairwise_self_bleu(assistant_turns)
+        all_conversations.append({
+            "conv_idx": conv_idx,
+            "n_turns": len(assistant_turns),
+            "mean_self_bleu": bleu_info["mean_self_bleu"],
+            "max_self_bleu": bleu_info["max_self_bleu"],
+            "consecutive_bleu": bleu_info["consecutive"],
+            "turn_details": turn_details,
+        })
+
+    # ── Aggregate metrics ─────────────────────────────────────────────────────
+    all_details = [d for c in all_conversations for d in c["turn_details"]]
+
+    # Repetition rate: % of conversations where any pair > threshold
+    repetition_rate = (
+        sum(1 for c in all_conversations if c["max_self_bleu"] > mt_cfg.self_bleu_threshold)
+        / len(all_conversations)
+    ) if all_conversations else 0.0
+
+    # Exact repeat rate: % of non-first responses with ≥threshold token overlap
+    non_first = [d for d in all_details if d["turn"] > 1]
+    exact_repeat_rate = (
+        sum(1 for d in non_first if d["exact_repeat"]) / len(non_first)
+    ) if non_first else 0.0
+
+    # Mean LCS tokens (non-first turns)
+    mean_lcs = (
+        sum(d["lcs_tokens"] for d in non_first) / len(non_first)
+    ) if non_first else 0.0
+
+    # Contextual relevance
+    relevance_scores = [d["context_relevance"] for d in all_details
+                        if d["context_relevance"] == d["context_relevance"]]  # exclude nan
+    mean_relevance = sum(relevance_scores) / len(relevance_scores) if relevance_scores else float("nan")
+    off_topic_rate = (
+        sum(1 for s in relevance_scores if s < mt_cfg.relevance_threshold) / len(relevance_scores)
+    ) if relevance_scores else float("nan")
+
+    # Degradation curves: per-turn-position averages
+    max_turn = mt_cfg.n_turns
+    bleu_by_turn = []
+    relevance_by_turn = []
+    for t in range(1, max_turn + 1):
+        turn_details_t = [d for d in all_details if d["turn"] == t]
+        bleu_vals = [d["self_bleu_vs_prev"] for d in turn_details_t]
+        bleu_by_turn.append(sum(bleu_vals) / len(bleu_vals) if bleu_vals else 0.0)
+        rel_vals = [d["context_relevance"] for d in turn_details_t
+                    if d["context_relevance"] == d["context_relevance"]]
+        relevance_by_turn.append(sum(rel_vals) / len(rel_vals) if rel_vals else float("nan"))
+
+    results = {
+        "mt_repetition_rate": repetition_rate,
+        "mt_exact_repeat_rate": exact_repeat_rate,
+        "mt_mean_lcs_tokens": mean_lcs,
+        "mt_mean_self_bleu": sum(c["mean_self_bleu"] for c in all_conversations) / len(all_conversations) if all_conversations else 0.0,
+        "mt_mean_relevance": mean_relevance,
+        "mt_off_topic_rate": off_topic_rate,
+        "mt_bleu_by_turn": bleu_by_turn,
+        "mt_relevance_by_turn": relevance_by_turn,
+        "mt_n_conversations": len(all_conversations),
+    }
+
+    # Print summary
+    print(f"\n{'═' * 55}")
+    print(f"  MULTI-TURN EVALUATION ({len(all_conversations)} conversations, {max_turn} turns each)")
+    print(f"{'═' * 55}")
+    print(f"  Repetition rate (self-BLEU > {mt_cfg.self_bleu_threshold}):  {repetition_rate:.1%}")
+    print(f"  Exact repeat rate (≥{mt_cfg.lcs_token_threshold} tokens):       {exact_repeat_rate:.1%}")
+    print(f"  Mean LCS tokens:                        {mean_lcs:.1f}")
+    print(f"  Mean self-BLEU:                          {results['mt_mean_self_bleu']:.3f}")
+    print(f"  Mean contextual relevance:               {mean_relevance:.3f}")
+    print(f"  Off-topic rate (< {mt_cfg.relevance_threshold}):              {off_topic_rate:.1%}")
+    print(f"\n  Self-BLEU by turn position:")
+    for t, b in enumerate(bleu_by_turn, 1):
+        bar = "█" * int(b * 40)
+        print(f"    Turn {t}: {b:.3f}  {bar}")
+    print(f"\n  Relevance by turn position:")
+    for t, r in enumerate(relevance_by_turn, 1):
+        bar = "█" * int(r * 40) if r == r else "?"
+        print(f"    Turn {t}: {r:.3f}  {bar}")
+    print(f"{'═' * 55}\n")
+
+    return {
+        "summary": results,
+        "conversations": all_conversations,
+        "all_details": all_details,
+    }
+
+
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
 def run(config_overrides: dict | None = None) -> dict:
@@ -514,6 +791,70 @@ def run(config_overrides: dict | None = None) -> dict:
     except Exception as e:
         print(f"   Perplexity skipped: {e}")
 
+    # ── Multi-turn evaluation ────────────────────────────────────────────────
+    mt_cfg = DEFAULT_MULTI_TURN_EVAL_CONFIG
+    if config_overrides:
+        for k, v in config_overrides.items():
+            if hasattr(mt_cfg, k):
+                setattr(mt_cfg, k, v)
+
+    mt_results = {}
+    try:
+        print("\n── Multi-turn evaluation …")
+        mt_full = eval_multi_turn(model, tokenizer, eval_ds, mt_cfg)
+        mt_results = mt_full["summary"]
+
+        # W&B: log multi-turn per-turn detail table
+        mt_table_data = [
+            [d["conversation_id"], d["turn"], d["user_msg"][:100],
+             d["response"][:200], d["self_bleu_vs_prev"],
+             d["lcs_tokens"], d["exact_repeat"],
+             d["context_relevance"], d["n_sentences"], d["has_advice"]]
+            for d in mt_full["all_details"]
+        ]
+        wandb.log({
+            "multi_turn_eval": wandb.Table(
+                data=mt_table_data,
+                columns=["conversation_id", "turn", "user_msg", "response",
+                         "self_bleu_vs_prev", "lcs_tokens", "exact_repeat",
+                         "context_relevance", "n_sentences", "has_advice"],
+            )
+        })
+
+        # W&B: log degradation curves as line charts
+        bleu_curve = mt_results.get("mt_bleu_by_turn", [])
+        rel_curve = mt_results.get("mt_relevance_by_turn", [])
+        if bleu_curve:
+            wandb.log({
+                "mt_bleu_degradation": wandb.plot.line(
+                    wandb.Table(
+                        data=[[t + 1, b] for t, b in enumerate(bleu_curve)],
+                        columns=["turn", "self_bleu_vs_prev"],
+                    ),
+                    "turn", "self_bleu_vs_prev",
+                    title="Self-BLEU Degradation by Turn",
+                )
+            })
+        if rel_curve:
+            wandb.log({
+                "mt_relevance_curve": wandb.plot.line(
+                    wandb.Table(
+                        data=[[t + 1, r] for t, r in enumerate(rel_curve)
+                              if r == r],  # skip nan
+                        columns=["turn", "context_relevance"],
+                    ),
+                    "turn", "context_relevance",
+                    title="Contextual Relevance by Turn",
+                )
+            })
+
+        # Log scalar metrics
+        mt_scalars = {k: v for k, v in mt_results.items()
+                      if not isinstance(v, list) and v == v}
+        wandb.log(mt_scalars)
+    except Exception as e:
+        print(f"   Multi-turn evaluation skipped: {e}")
+
     # ── GRPO decision ─────────────────────────────────────────────────────────
     grpo_needed = pct_over_5 > cfg.grpo_trigger_pct
     print(f"\n{'═'*55}")
@@ -537,6 +878,7 @@ def run(config_overrides: dict | None = None) -> dict:
         "sentence_count_distribution": dict(dist),
         "n_evaluated": len(responses),
         "n_exempt": exempt_count,
+        **{k: v for k, v in mt_results.items() if not isinstance(v, list)},
     }
 
     Path(cfg.results_save_path).parent.mkdir(parents=True, exist_ok=True)

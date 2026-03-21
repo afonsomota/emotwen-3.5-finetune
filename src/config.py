@@ -105,6 +105,9 @@ class DataConfig:
     max_go_emotions_synthetic: int = 5000
     max_counsel_chat: int = 2000
 
+    # Fraction of synthetic single-turn examples to extend to multi-turn
+    multi_turn_extension_fraction: float = 0.50
+
     train_split: float = 0.90
     eval_holdout_size: int = 200
     random_seed: int = 42
@@ -195,6 +198,20 @@ class EvalConfig:
     results_save_path: str = str(OUTPUTS_DIR / "eval_results.json")
     report_to: str = "wandb"
 
+# ─── Multi-turn evaluation config ─────────────────────────────────────────────
+
+@dataclass
+class MultiTurnEvalConfig:
+    n_turns: int = 5                    # Max assistant turns to generate per conversation
+    n_conversations: int = 50           # Number of conversations to simulate
+    self_bleu_threshold: float = 0.6    # Flag conversation as repetitive if any pair exceeds this
+    lcs_token_threshold: int = 10       # Flag if longest common substring ≥ this many tokens
+    relevance_threshold: float = 0.3    # Flag response as off-topic if cosine sim below this
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    max_new_tokens: int = 200
+    temperature: float = 0.7
+    top_p: float = 0.9
+
 # ─── GRPO training config ─────────────────────────────────────────────────────
 
 @dataclass
@@ -251,6 +268,7 @@ DEFAULT_LORA_CONFIG = LoraConfig()
 DEFAULT_SFT_STAGE1_CONFIG = SFTStage1Config()
 DEFAULT_SFT_STAGE2_CONFIG = SFTStage2Config()
 DEFAULT_EVAL_CONFIG = EvalConfig()
+DEFAULT_MULTI_TURN_EVAL_CONFIG = MultiTurnEvalConfig()
 DEFAULT_GRPO_LORA_CONFIG = GRPOLoraConfig()
 DEFAULT_GRPO_TRAIN_CONFIG = GRPOTrainConfig()
 DEFAULT_WANDB_CONFIG = WandbConfig()

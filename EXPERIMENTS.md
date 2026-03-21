@@ -173,3 +173,62 @@ This is a fallback if Experiments 2–5 don't fully resolve the issue.
 | Existing eval: sentence range compliance | passing | no regression |
 | Existing eval: advice rate | passing | no regression |
 | LLM judge mean scores | passing | no regression |
+
+---
+
+## Implementation Status
+
+### Experiment 0 — IMPLEMENTED
+
+**Files changed:**
+
+| File | What was added |
+|------|---------------|
+| `src/config.py` | `MultiTurnEvalConfig` dataclass with thresholds and embedding model |
+| `src/utils.py` | `self_bleu()`, `pairwise_self_bleu()`, `longest_common_substring_tokens()`, `exact_repeat_check()` |
+| `src/evaluate.py` | `eval_multi_turn()` — full conversation driver with follow-up pool, W&B table + degradation curve logging |
+
+**How to run:**
+
+```python
+from src.evaluate import run
+# Multi-turn eval runs automatically as part of the standard eval pipeline.
+# To configure:
+results = run({
+    "n_turns": 5,              # assistant turns per conversation
+    "n_conversations": 50,     # conversations to simulate
+    "self_bleu_threshold": 0.6,
+    "lcs_token_threshold": 10,
+    "relevance_threshold": 0.3,
+})
+```
+
+**New W&B outputs:**
+- `multi_turn_eval` table — per-turn rows with self-BLEU, LCS, relevance, etc.
+- `mt_bleu_degradation` line chart — self-BLEU by turn position
+- `mt_relevance_curve` line chart — contextual relevance by turn position
+- Scalar metrics: `mt_repetition_rate`, `mt_exact_repeat_rate`, `mt_mean_relevance`, `mt_off_topic_rate`
+
+**New dependency:** `pip install sentence-transformers` (for contextual relevance; ~80MB). Skipped gracefully if not installed.
+
+### Experiment 3 (partial) — Multi-Turn Data Augmentation IMPLEMENTED
+
+**Files changed:**
+
+| File | What was added |
+|------|---------------|
+| `src/config.py` | `DataConfig.multi_turn_extension_fraction` (default: 0.50) |
+| `src/data_prep.py` | `_CONTINUATION_TEMPLATES` (48 emotion-specific follow-up pairs), `_CONTINUATION_LABEL_MAP`, `_extend_to_multi_turn()` |
+| `src/train_sft.py` | Added `*_multi_turn` source tags to Stage 2 domain filter |
+
+**How it works:**
+- 50% of go_emotions + dair_emotion synthetic examples are extended from 1 turn to 2 assistant turns
+- Each continuation includes a user follow-up and an assistant reflection that references prior context
+- Covers 12 emotion categories with 2-5 template variants each
+- Extended examples get source tag `*_multi_turn` and are routed to SFT Stage 2
+
+**To adjust fraction:**
+```python
+from src.data_prep import run
+run({"multi_turn_extension_fraction": 0.70})  # extend 70% instead of 50%
+```

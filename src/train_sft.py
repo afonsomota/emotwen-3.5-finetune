@@ -246,6 +246,7 @@ def run(config_overrides: dict | None = None) -> dict:
     domain_sources = {
         "go_emotions_synthetic", "dair_emotion_synthetic",
         "counsel_chat_synthetic", "let_me_explain",
+        "go_emotions_synthetic_multi_turn", "dair_emotion_synthetic_multi_turn",
     }
 
     def filter_by_source(ds, sources):

@@ -232,6 +232,268 @@ _LET_ME_EXPLAIN_EXAMPLES: list[dict] = [
 ]
 
 
+# ─── Multi-turn continuation templates ────────────────────────────────────────
+# Each entry is (user_follow_up, assistant_reflection) for extending single-turn
+# synthetic conversations into 3-turn ones. Keyed by emotion category.
+# The assistant reflections deliberately reference prior context ("earlier",
+# "what you said before") to teach the model to track conversation history.
+
+_CONTINUATION_TEMPLATES: dict[str, list[tuple[str, str]]] = {
+    "sadness": [
+        (
+            "I think what makes it worse is that no one around me really sees it.",
+            "It sounds like there's loneliness layered on top of the sadness — "
+            "like the grief itself isn't the only weight you're carrying. "
+            "What would it feel like to be truly seen in this?",
+        ),
+        (
+            "I keep replaying it in my head, over and over.",
+            "That replaying sounds exhausting — like your mind keeps searching "
+            "for something it hasn't found yet. "
+            "What do you think it's looking for?",
+        ),
+        (
+            "It's been like this for a while. I'm just tired of it.",
+            "The fatigue you're describing makes sense, given how long you've "
+            "been holding all of this. "
+            "What part of it feels heaviest right now?",
+        ),
+        (
+            "Sometimes I wonder if I'll ever feel differently about it.",
+            "That uncertainty sounds really hard to sit with — "
+            "not knowing if the sadness has an end. "
+            "What would it mean to you if things did start to shift?",
+        ),
+        (
+            "I didn't expect it to still hurt this much.",
+            "There's a rawness in that — like the wound is fresher than "
+            "you thought it would be. "
+            "What does the pain feel like it's connected to?",
+        ),
+    ],
+    "anger": [
+        (
+            "And the worst part is nobody else seems to care.",
+            "That gap between how strongly you feel it and how invisible "
+            "it seems to everyone else — that must be really isolating. "
+            "What do you wish they could understand?",
+        ),
+        (
+            "I've tried to let it go but I can't.",
+            "It sounds like this isn't something that's ready to be "
+            "let go of yet — there's still something unresolved there. "
+            "What feels most unfinished about it?",
+        ),
+        (
+            "I don't even know why it makes me so angry.",
+            "Sometimes anger shows up before we fully understand what "
+            "it's protecting. You mentioned earlier something felt deeply wrong — "
+            "what value of yours do you think was crossed?",
+        ),
+        (
+            "Part of me feels like I don't have the right to be this mad.",
+            "That tension — feeling the anger but questioning whether "
+            "you're allowed to feel it — that's a heavy place to be. "
+            "What would change if you gave yourself full permission?",
+        ),
+        (
+            "I keep snapping at people who don't deserve it.",
+            "It sounds like the anger is spilling over because "
+            "it doesn't have anywhere else to go. "
+            "Where does it feel like it really belongs?",
+        ),
+    ],
+    "joy": [
+        (
+            "I almost feel guilty for being this happy.",
+            "That's an interesting mix — the happiness itself is real, "
+            "but there's something pulling against it. "
+            "What does the guilt seem to be about?",
+        ),
+        (
+            "I want to hold onto this feeling but I know it won't last.",
+            "There's something bittersweet in that awareness — "
+            "knowing that joy is temporary but wanting it to stay. "
+            "What would it be like to just be in it right now?",
+        ),
+        (
+            "It reminded me of how things used to be.",
+            "There's a warmth in that memory — like the joy you're "
+            "feeling now is connected to something from before. "
+            "What is it about the past that this moment echoes?",
+        ),
+        (
+            "I shared it with someone and they didn't really get it.",
+            "That disconnect can take some of the shine off — "
+            "wanting someone to share in what you felt and not quite landing. "
+            "What made this moment so special for you?",
+        ),
+    ],
+    "fear": [
+        (
+            "I keep imagining the worst-case scenario.",
+            "When fear takes hold, the mind can race to the darkest place. "
+            "Earlier you named what felt most at stake — "
+            "what would it mean if you could hold uncertainty without the worst case?",
+        ),
+        (
+            "I know it's probably irrational but I can't stop it.",
+            "Calling it irrational doesn't seem to take the edge off — "
+            "the feeling is still very present regardless. "
+            "What does the fear feel like in your body?",
+        ),
+        (
+            "I've been avoiding dealing with it entirely.",
+            "Avoidance makes sense when something feels this threatening. "
+            "What you described before sounds genuinely overwhelming. "
+            "What's the smallest piece of it you could face?",
+        ),
+        (
+            "I don't know who to talk to about it.",
+            "Carrying fear alone can make it feel even bigger than it is. "
+            "What would it be like to share just a small part of it?",
+        ),
+    ],
+    "surprise": [
+        (
+            "I'm still processing it, honestly.",
+            "It sounds like you're right in the middle of that — "
+            "the event happened but your feelings haven't fully caught up yet. "
+            "What's the first thing that comes up when you sit with it?",
+        ),
+        (
+            "I can't tell if it's a good thing or a bad thing yet.",
+            "That ambiguity is part of what makes surprise so disorienting — "
+            "the meaning hasn't settled. "
+            "What does your gut tell you?",
+        ),
+    ],
+    "disgust": [
+        (
+            "I can't stop thinking about how wrong it felt.",
+            "That lingering sense of wrongness sounds like it's really "
+            "stuck with you — like something fundamental was violated. "
+            "What would it take for that feeling to ease?",
+        ),
+        (
+            "I feel like I should've said something in the moment.",
+            "That regret about not speaking up — it sounds like it's "
+            "adding another layer on top of the discomfort you already felt. "
+            "What would you have wanted to say?",
+        ),
+    ],
+    "neutral": [
+        (
+            "I'm not sure why I wrote about this, actually.",
+            "Sometimes things surface without a clear reason — "
+            "the fact that it came to mind might be telling. "
+            "What was happening just before you sat down to write?",
+        ),
+        (
+            "I think there's more there but I can't quite reach it.",
+            "That sense of something underneath — just out of reach — "
+            "is worth paying attention to. "
+            "If the feeling had words, what might it say?",
+        ),
+        (
+            "I guess I've been on autopilot lately.",
+            "Autopilot can be a way of getting through things when "
+            "there's a lot to carry. "
+            "What would it feel like to slow down right now?",
+        ),
+    ],
+    "gratitude": [
+        (
+            "I don't say this kind of thing often enough.",
+            "There's something significant about stopping to "
+            "acknowledge gratitude — it's easy to let it slip by unnoticed. "
+            "What made today different?",
+        ),
+        (
+            "It made me realise how much I take for granted.",
+            "That kind of awareness can be both grounding and a little startling. "
+            "What you shared earlier clearly touched something deep. "
+            "What would you most want to carry forward from this?",
+        ),
+    ],
+    "embarrassment": [
+        (
+            "I keep cringing every time I think about it.",
+            "That physical reaction — the cringing — shows how alive "
+            "the memory still is in your body. "
+            "What's the version of you in that moment that you're most uncomfortable with?",
+        ),
+        (
+            "I know nobody probably even remembers it but me.",
+            "It's interesting how embarrassment can make us the main character "
+            "in a scene that everyone else has moved on from. "
+            "What is it that you're still holding onto about it?",
+        ),
+    ],
+    "disappointment": [
+        (
+            "I really thought it would be different this time.",
+            "That expectation — and the gap between what you hoped for "
+            "and what happened — sounds genuinely painful. "
+            "What made this time feel like it could be different?",
+        ),
+        (
+            "I'm starting to wonder if I set myself up for it.",
+            "There's a lot of self-questioning in that, and it sounds heavy. "
+            "What you described earlier seemed like a very reasonable hope. "
+            "What would it be like to hold both things — the hope and the letdown?",
+        ),
+    ],
+}
+
+# Map fine-grained emotion labels to continuation template keys
+_CONTINUATION_LABEL_MAP = {
+    "admiration": "joy",
+    "amusement": "joy",
+    "caring": "gratitude",
+    "confusion": "neutral",
+    "curiosity": "neutral",
+    "disapproval": "anger",
+    "excitement": "joy",
+    "grief": "sadness",
+    "love": "joy",
+    "nervousness": "fear",
+    "optimism": "joy",
+    "pride": "joy",
+    "relief": "joy",
+    "remorse": "sadness",
+}
+
+
+def _extend_to_multi_turn(
+    single_turn_conv: dict,
+    emotion_label: str,
+    rng: random.Random,
+) -> dict | None:
+    """
+    Extend a single-turn synthetic conversation to 3 turns using templates.
+
+    Returns None if no continuation template is available for this emotion.
+    """
+    # Map fine-grained labels to template keys
+    template_key = _CONTINUATION_LABEL_MAP.get(emotion_label, emotion_label)
+    templates = _CONTINUATION_TEMPLATES.get(template_key)
+    if not templates:
+        return None
+
+    user_follow_up, assistant_reflection = rng.choice(templates)
+    messages = list(single_turn_conv["messages"])  # copy
+
+    # Add second turn
+    messages.append({"role": "user", "content": user_follow_up})
+    messages.append({"role": "assistant", "content": assistant_reflection})
+
+    return {
+        "messages": messages,
+        "source": single_turn_conv["source"] + "_multi_turn",
+    }
+
+
 # ─── Core conversion functions ────────────────────────────────────────────────
 
 def _ed_split_to_messages(
@@ -360,7 +622,11 @@ def _go_emotions_to_messages(
             {"role": "user", "content": f"I wrote this in my journal today:\n\n\"{text}\""},
             {"role": "assistant", "content": reflection},
         ]
-        conversations.append({"messages": messages, "source": source_tag})
+        conversations.append({
+            "messages": messages,
+            "source": source_tag,
+            "emotion_label": label_name,
+        })
 
     return conversations
 
@@ -382,7 +648,11 @@ def _dair_emotion_to_messages(
             {"role": "user", "content": f"I wrote this in my journal:\n\n\"{text}\""},
             {"role": "assistant", "content": reflection},
         ]
-        conversations.append({"messages": messages, "source": "dair_emotion_synthetic"})
+        conversations.append({
+            "messages": messages,
+            "source": "dair_emotion_synthetic",
+            "emotion_label": label_name,
+        })
     return conversations
 
 
@@ -529,8 +799,23 @@ def run(config_overrides: dict | None = None) -> dict:
     lme_convs = _let_me_explain_conversations(SYSTEM_PROMPT_BASE)
     print(f"    'Let me explain:' exemplars: {len(lme_convs)}")
 
+    # ── Extend synthetic single-turn → multi-turn ─────────────────────────────
+    mt_fraction = cfg.multi_turn_extension_fraction
+    mt_sources = ge_convs + em_convs  # single-turn synthetic sources with emotion labels
+    rng.shuffle(mt_sources)
+    n_to_extend = int(len(mt_sources) * mt_fraction)
+    multi_turn_convs = []
+    for conv in mt_sources[:n_to_extend]:
+        label = conv.get("emotion_label", "neutral")
+        extended = _extend_to_multi_turn(conv, label, rng)
+        if extended is not None:
+            multi_turn_convs.append(extended)
+    print(f"\n    Multi-turn extensions: {len(multi_turn_convs)} "
+          f"(from {n_to_extend} candidates, {mt_fraction:.0%} of synthetic)")
+
     # ── Combine all ───────────────────────────────────────────────────────────
-    all_convs = ed_convs_raw + dd_convs_raw + ge_convs + em_convs + cc_convs + lme_convs
+    all_convs = (ed_convs_raw + dd_convs_raw + ge_convs + em_convs
+                 + cc_convs + lme_convs + multi_turn_convs)
     rng.shuffle(all_convs)
 
     sources = {}
