@@ -12,11 +12,20 @@
 #   --disk DISK            Disk space in GB (default: 50)
 #   --env KEY=VAL          Environment variable (repeatable)
 #   --env-file FILE        Load KEY=VAL lines from file (skips blanks and #comments)
+#   --sync CONN:SRC:DST    Cloud sync mount (repeatable, like -v in Docker).
+#                          Before the job, copies CONN:SRC → DST on the instance.
+#                          After the job, copies DST → CONN:SRC back.
+#                          CONN = vast.ai cloud connection ID (from account page)
+#                          SRC  = path in cloud storage
+#                          DST  = absolute path on the instance
 #   --onstart-cmd CMD      Command to run on instance start
 #   --label LABEL          Instance label
 #   --ssh                  Launch in SSH mode (default: jupyter)
 #   --direct               Use direct (non-proxy) connections
 #   --dry-run              Print the create command without executing
+#
+# Cloud sync requires VAST_API_KEY in the environment (full API key, not
+# the limited CONTAINER_API_KEY). It is passed to the instance automatically.
 #
 # Requires: vastai CLI configured with `vastai set api-key <KEY>`
 #
@@ -30,6 +39,12 @@
 #     --max-price 3.0 --disk 100 --ssh --direct \
 #     --env PROVISIONING_SCRIPT=https://example.com/setup.sh \
 #     --env WANDB_API_KEY=xxx
+#
+#   # With cloud sync (persist outputs and data dirs)
+#   ./vastai-launch.sh \
+#     --sync 52:/myproject/outputs:/workspace/myproject/outputs \
+#     --sync 52:/myproject/data:/workspace/myproject/data \
+#     --env PROVISIONING_SCRIPT=https://example.com/setup.sh
 
 set -euo pipefail
 
@@ -44,6 +59,7 @@ MODE="--jupyter"
 DIRECT=""
 DRY_RUN=false
 declare -a ENV_PAIRS=()
+declare -a SYNC_MOUNTS=()
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -66,13 +82,37 @@ while [[ $# -gt 0 ]]; do
                 ENV_PAIRS+=("$line")
             done < "$2"
             shift 2 ;;
+        --sync)
+            # Validate format: CONN:SRC:DST
+            if [[ ! "$2" =~ ^[^:]+:[^:]+:.+$ ]]; then
+                echo "Error: --sync must be CONNECTION:REMOTE_PATH:INSTANCE_PATH" >&2
+                echo "  e.g. 52:/myproject/outputs:/workspace/myproject/outputs" >&2
+                exit 1
+            fi
+            SYNC_MOUNTS+=("$2")
+            shift 2 ;;
         -h|--help)
-            head -35 "$0" | tail -n +2 | sed 's/^# \?//'
+            head -46 "$0" | tail -n +2 | sed 's/^# \?//'
             exit 0 ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# ── Pack sync mounts into env var ────────────────────────────────────────────
+# Format: pipe-separated list of CONN:SRC:DST entries
+# The provisioning script on the instance parses this to sync before/after jobs.
+if [[ ${#SYNC_MOUNTS[@]} -gt 0 ]]; then
+    MOUNTS_STR=$(IFS='|'; echo "${SYNC_MOUNTS[*]}")
+    ENV_PAIRS+=("CLOUD_SYNC_MOUNTS=$MOUNTS_STR")
+
+    # Cloud sync needs the full API key on the instance
+    if [[ -n "${VAST_API_KEY:-}" ]]; then
+        ENV_PAIRS+=("VAST_API_KEY=$VAST_API_KEY")
+    else
+        echo "Warning: VAST_API_KEY not set. Cloud sync requires the full vast.ai API key." >&2
+    fi
+fi
 
 # ── Build env string ─────────────────────────────────────────────────────────
 ENV_STR=""
@@ -122,6 +162,14 @@ if $DRY_RUN; then
     echo ""
     echo "[dry-run] Would execute:"
     echo "  ${CMD[*]}"
+    if [[ ${#SYNC_MOUNTS[@]} -gt 0 ]]; then
+        echo ""
+        echo "[dry-run] Cloud sync mounts:"
+        for mount in "${SYNC_MOUNTS[@]}"; do
+            IFS=':' read -r conn src dst <<< "$mount"
+            echo "  $conn:$src ↔ $dst"
+        done
+    fi
     exit 0
 fi
 
@@ -143,4 +191,12 @@ echo "  Monitor:  vastai show instance $INSTANCE_ID"
 echo "  Logs:     vastai logs $INSTANCE_ID"
 echo "  SSH:      vastai ssh-url $INSTANCE_ID"
 echo "  Destroy:  vastai destroy instance $INSTANCE_ID"
+if [[ ${#SYNC_MOUNTS[@]} -gt 0 ]]; then
+    echo ""
+    echo "  Cloud sync mounts:"
+    for mount in "${SYNC_MOUNTS[@]}"; do
+        IFS=':' read -r conn src dst <<< "$mount"
+        echo "    $conn:$src ↔ $dst"
+    done
+fi
 echo "════════════════════════════════════════════════════════════"
