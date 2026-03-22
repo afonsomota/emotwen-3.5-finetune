@@ -270,23 +270,66 @@ def _load_model_and_tokenizer(
         return model, tokenizer
 
 
-def _generate_response(
+def _generate_batch(
     model,
     tokenizer,
-    messages: list[dict],
+    batch_messages: list[list[dict]],
     max_new_tokens: int,
     temperature: float,
     top_p: float,
-) -> str:
-    """Generate a single response given a message history."""
+) -> list[str]:
+    """Generate responses for a batch of message histories.
+
+    Pads from the left so generation starts at the same position for all
+    sequences in the batch. Returns one decoded string per input.
+    """
     import torch
 
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    inputs = tokenizer(text=prompt, return_tensors="pt").to(model.device)
+    if not batch_messages:
+        return []
+
+    # Single-item fast path (no padding overhead)
+    if len(batch_messages) == 1:
+        prompt = tokenizer.apply_chat_template(
+            batch_messages[0], tokenize=False, add_generation_prompt=True,
+        )
+        inputs = tokenizer(text=prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
+        return [tokenizer.decode(new_tokens, skip_special_tokens=True).strip()]
+
+    # Batch path: left-pad, generate, decode per-sequence
+    prompts = [
+        tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True,
+        )
+        for msgs in batch_messages
+    ]
+
+    # Left-pad for batched generation
+    orig_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    inputs = tokenizer(
+        text=prompts, return_tensors="pt", padding=True, truncation=True,
+        max_length=1024,
+    ).to(model.device)
+
+    prompt_lengths = [
+        (row != tokenizer.pad_token_id).sum().item()
+        for row in inputs["input_ids"]
+    ]
+
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
@@ -296,10 +339,30 @@ def _generate_response(
             do_sample=True,
             pad_token_id=tokenizer.eos_token_id,
         )
-    # Decode only the new tokens
-    new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
-    text = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-    return text
+
+    tokenizer.padding_side = orig_side
+
+    results = []
+    for idx, plen in enumerate(prompt_lengths):
+        new_tokens = output_ids[idx][inputs["input_ids"].shape[1]:]
+        text = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        results.append(text)
+
+    return results
+
+
+def _generate_response(
+    model,
+    tokenizer,
+    messages: list[dict],
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+) -> str:
+    """Generate a single response given a message history."""
+    return _generate_batch(
+        model, tokenizer, [messages], max_new_tokens, temperature, top_p,
+    )[0]
 
 
 def generate_self_chat(
@@ -343,14 +406,13 @@ def generate_self_chat(
         for seed in seeds:
             seed_list.append((emotion, seed))
 
-    conversations = []
-    n_failed = 0
-
-    for i in range(cfg.n_conversations):
+    # ── Initialise all conversations with seeds ──────────────────────────────
+    # Each "active" entry tracks messages, target turns, emotion, and status.
+    active = []
+    for _ in range(cfg.n_conversations):
         emotion_label, seed_text = rng.choice(seed_list)
         n_turns = rng.randint(cfg.min_turns, cfg.max_turns)
 
-        # Choose system prompt (with optional RAG injection)
         use_rag = rng.random() < cfg.rag_injection_fraction
         if use_rag and rag_pool and rag_pool.get(emotion_label):
             similar = rng.sample(
@@ -362,58 +424,88 @@ def generate_self_chat(
         else:
             sys_prompt = SYSTEM_PROMPT_BASE
 
-        # Start conversation with seed
-        messages = [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": seed_text},
-        ]
+        active.append({
+            "messages": [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": seed_text},
+            ],
+            "emotion_label": emotion_label,
+            "target_turns": n_turns,
+            "actual_turns": 0,
+            "failed": False,
+        })
 
-        ok = True
-        actual_turns = 0
-        for turn_idx in range(n_turns):
-            # Generate assistant response
-            assistant_text = _generate_response(
-                model, tokenizer, messages,
+    batch_size = cfg.batch_size
+    max_turn = cfg.max_turns
+
+    # ── Turn-synchronous batched generation ──────────────────────────────────
+    # At each turn step, batch all still-active conversations together.
+    for turn_idx in range(max_turn):
+        # Filter to conversations that still need this turn
+        pending = [a for a in active if not a["failed"]
+                   and a["actual_turns"] < a["target_turns"]]
+        if not pending:
+            break
+
+        # --- Assistant turn (batched) ---
+        for batch_start in range(0, len(pending), batch_size):
+            batch = pending[batch_start:batch_start + batch_size]
+            batch_msgs = [a["messages"] for a in batch]
+            responses = _generate_batch(
+                model, tokenizer, batch_msgs,
                 cfg.max_new_tokens, cfg.temperature, cfg.top_p,
             )
-            if not assistant_text or has_advice(assistant_text):
-                ok = False
-                break
-            messages.append({"role": "assistant", "content": assistant_text})
-            actual_turns += 1
+            for a, text in zip(batch, responses):
+                if not text or has_advice(text):
+                    a["failed"] = True
+                else:
+                    a["messages"].append({"role": "assistant", "content": text})
+                    a["actual_turns"] += 1
 
-            # Generate next user turn (unless this is the last turn)
-            if turn_idx < n_turns - 1:
-                # Swap system prompt to make the model write as the user
-                user_gen_messages = [
-                    {"role": "system", "content": _SELF_CHAT_USER_PROMPT},
-                ] + [m for m in messages[1:]]  # skip original system prompt
-                user_text = _generate_response(
-                    model, tokenizer, user_gen_messages,
-                    100,  # shorter for user turns
-                    cfg.temperature, cfg.top_p,
-                )
-                if not user_text:
-                    ok = False
-                    break
-                messages.append({"role": "user", "content": user_text})
+        # --- User follow-up turn (batched, for conversations that continue) ---
+        need_user = [a for a in active if not a["failed"]
+                     and a["actual_turns"] < a["target_turns"]]
+        if not need_user:
+            continue
 
-        if ok and actual_turns >= cfg.min_turns:
-            # Ensure conversation ends with assistant turn
-            if messages[-1]["role"] != "assistant":
-                messages = messages[:-1]
+        for batch_start in range(0, len(need_user), batch_size):
+            batch = need_user[batch_start:batch_start + batch_size]
+            # Swap system prompt to user-writer persona
+            batch_msgs = [
+                [{"role": "system", "content": _SELF_CHAT_USER_PROMPT}]
+                + a["messages"][1:]  # skip original system prompt
+                for a in batch
+            ]
+            responses = _generate_batch(
+                model, tokenizer, batch_msgs,
+                100, cfg.temperature, cfg.top_p,
+            )
+            for a, text in zip(batch, responses):
+                if not text:
+                    a["failed"] = True
+                else:
+                    a["messages"].append({"role": "user", "content": text})
+
+        n_ok = sum(1 for a in active if not a["failed"])
+        print(f"  Turn {turn_idx + 1}: {n_ok}/{len(active)} active "
+              f"({len(active) - n_ok} failed)")
+
+    # ── Collect results ──────────────────────────────────────────────────────
+    conversations = []
+    n_failed = 0
+    for a in active:
+        if not a["failed"] and a["actual_turns"] >= cfg.min_turns:
+            msgs = a["messages"]
+            if msgs[-1]["role"] != "assistant":
+                msgs = msgs[:-1]
             conversations.append({
-                "messages": messages,
+                "messages": msgs,
                 "source": "self_chat",
-                "emotion_label": emotion_label,
-                "n_turns": actual_turns,
+                "emotion_label": a["emotion_label"],
+                "n_turns": a["actual_turns"],
             })
         else:
             n_failed += 1
-
-        if (i + 1) % 100 == 0:
-            print(f"  Self-chat: {i + 1}/{cfg.n_conversations} "
-                  f"({len(conversations)} ok, {n_failed} failed)")
 
     print(f"  Self-chat complete: {len(conversations)} conversations "
           f"({n_failed} failed / filtered)")
@@ -526,73 +618,107 @@ def augment_conversations(
         )
         print("  Model loaded.")
 
-    augmented = []
-    n_failed = 0
+    # Prepare active state for each conversation
+    active = []
+    for conv_data in to_augment:
+        active.append({
+            "messages": list(conv_data["messages"]),
+            "emotion": conv_data["emotion"],
+            "target_extra": rng.randint(cfg.min_extra_turns, cfg.max_extra_turns),
+            "turns_added": 0,
+            "failed": False,
+        })
 
-    for i, conv_data in enumerate(to_augment):
-        messages = list(conv_data["messages"])  # copy
-        emotion = conv_data["emotion"]
-        n_extra = rng.randint(cfg.min_extra_turns, cfg.max_extra_turns)
+    batch_size = cfg.batch_size
+    max_extra = cfg.max_extra_turns
 
-        ok = True
-        turns_added = 0
-        for _ in range(n_extra):
-            # Generate user follow-up
-            user_gen_messages = [
-                {"role": "system", "content": _SELF_CHAT_USER_PROMPT},
-            ] + [m for m in messages[1:]]  # skip system prompt
+    # ── Turn-synchronous batched augmentation ────────────────────────────────
+    for extra_idx in range(max_extra):
+        pending = [a for a in active if not a["failed"]
+                   and a["turns_added"] < a["target_extra"]]
+        if not pending:
+            break
 
-            if cfg.backend == "local":
-                user_text = _generate_response(
-                    model, tokenizer, user_gen_messages,
+        # --- User follow-up (batched for local, sequential for API) ---
+        if cfg.backend == "local":
+            for batch_start in range(0, len(pending), batch_size):
+                batch = pending[batch_start:batch_start + batch_size]
+                batch_msgs = [
+                    [{"role": "system", "content": _SELF_CHAT_USER_PROMPT}]
+                    + a["messages"][1:]
+                    for a in batch
+                ]
+                responses = _generate_batch(
+                    model, tokenizer, batch_msgs,
                     100, cfg.temperature, cfg.top_p,
                 )
-            else:
-                user_text = _generate_via_api(
-                    user_gen_messages, cfg.backend, cfg.api_model,
+                for a, text in zip(batch, responses):
+                    if not text:
+                        a["failed"] = True
+                    else:
+                        a["messages"].append({"role": "user", "content": text})
+        else:
+            for a in pending:
+                user_msgs = (
+                    [{"role": "system", "content": _SELF_CHAT_USER_PROMPT}]
+                    + a["messages"][1:]
+                )
+                text = _generate_via_api(
+                    user_msgs, cfg.backend, cfg.api_model,
                     100, cfg.temperature,
                 )
+                if not text:
+                    a["failed"] = True
+                else:
+                    a["messages"].append({"role": "user", "content": text})
 
-            if not user_text:
-                ok = False
-                break
-            messages.append({"role": "user", "content": user_text})
-
-            # Generate assistant response
-            if cfg.backend == "local":
-                assistant_text = _generate_response(
-                    model, tokenizer, messages,
+        # --- Assistant response (batched for local, sequential for API) ---
+        need_assistant = [a for a in pending if not a["failed"]]
+        if cfg.backend == "local":
+            for batch_start in range(0, len(need_assistant), batch_size):
+                batch = need_assistant[batch_start:batch_start + batch_size]
+                batch_msgs = [a["messages"] for a in batch]
+                responses = _generate_batch(
+                    model, tokenizer, batch_msgs,
                     cfg.max_new_tokens, cfg.temperature, cfg.top_p,
                 )
-            else:
-                assistant_text = _generate_via_api(
-                    messages, cfg.backend, cfg.api_model,
+                for a, text in zip(batch, responses):
+                    if not text or has_advice(text):
+                        a["messages"].pop()  # remove the user turn
+                        a["failed"] = True
+                    else:
+                        a["messages"].append({"role": "assistant", "content": text})
+                        a["turns_added"] += 1
+        else:
+            for a in need_assistant:
+                text = _generate_via_api(
+                    a["messages"], cfg.backend, cfg.api_model,
                     cfg.max_new_tokens, cfg.temperature,
                 )
+                if not text or has_advice(text):
+                    a["messages"].pop()
+                    a["failed"] = True
+                else:
+                    a["messages"].append({"role": "assistant", "content": text})
+                    a["turns_added"] += 1
 
-            if not assistant_text or has_advice(assistant_text):
-                # Remove the user turn we just added
-                messages.pop()
-                ok = False
-                break
-            messages.append({"role": "assistant", "content": assistant_text})
-            turns_added += 1
+        n_ok = sum(1 for a in active if not a["failed"])
+        print(f"  Extra turn {extra_idx + 1}: {n_ok}/{len(active)} active")
 
-        if turns_added > 0:
-            # Count actual assistant turns (excluding system)
-            n_assistant = sum(1 for m in messages if m["role"] == "assistant")
+    # ── Collect results ──────────────────────────────────────────────────────
+    augmented = []
+    n_failed = 0
+    for a in active:
+        if a["turns_added"] > 0:
+            n_assistant = sum(1 for m in a["messages"] if m["role"] == "assistant")
             augmented.append({
-                "messages": messages,
+                "messages": a["messages"],
                 "source": "augmented_empathetic_dialogues",
-                "emotion_label": emotion,
+                "emotion_label": a["emotion"],
                 "n_turns": n_assistant,
             })
         else:
             n_failed += 1
-
-        if (i + 1) % 100 == 0:
-            print(f"  Augmentation: {i + 1}/{len(to_augment)} "
-                  f"({len(augmented)} ok, {n_failed} failed)")
 
     print(f"  Augmentation complete: {len(augmented)} conversations "
           f"({n_failed} failed / filtered)")
