@@ -51,6 +51,13 @@ echo "════════════════════════�
 . /venv/main/bin/activate
 echo "[provisioning] venv: $(which python) — torch $(python -c 'import torch; print(torch.__version__)')"
 
+# ── Install uv if not available ────────────────────────────────────────────
+if ! command -v uv &>/dev/null; then
+    echo "[provisioning] Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
 # ── Unsloth (must come after torch) ─────────────────────────────────────────
 echo "[provisioning] Installing Unsloth..."
 uv pip install \

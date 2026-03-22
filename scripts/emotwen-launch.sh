@@ -53,7 +53,7 @@ STAGE="full_train"
 OVERRIDES=""
 INTERACTIVE=false
 BRANCH="$(git -C "$(dirname "$0")" rev-parse --abbrev-ref HEAD)"
-GPU_QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.95 verified=true'
+GPU_QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.90 verified=true'
 MAX_PRICE="0.5"
 DISK="50"
 CLOUD_SYNC=""      # connection_id:remote_path
