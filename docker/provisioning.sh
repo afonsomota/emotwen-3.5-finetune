@@ -46,10 +46,12 @@ echo "════════════════════════�
 echo "  EmotWen 3.5 — Provisioning"
 echo "════════════════════════════════════════════════════════════"
 
-# ── Activate the PyTorch template venv ───────────────────────────────────────
-# The PyTorch template provides /venv/main with torch pre-installed.
-. /venv/main/bin/activate
-echo "[provisioning] venv: $(which python) — torch $(python -c 'import torch; print(torch.__version__)')"
+# ── Activate venv (if available) ──────────────────────────────────────────────
+# The vastai/pytorch template uses /venv/main; official pytorch image has torch globally.
+if [ -f /venv/main/bin/activate ]; then
+    . /venv/main/bin/activate
+fi
+echo "[provisioning] python: $(which python) — torch $(python -c 'import torch; print(torch.__version__)')"
 
 # ── Install uv if not available ────────────────────────────────────────────
 if ! command -v uv &>/dev/null; then
@@ -64,10 +66,9 @@ uv pip install \
     'unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo' \
     'unsloth[base] @ git+https://github.com/unslothai/unsloth'
 
-# ── Pin TRL + transformers versions ─────────────────────────────────────────
-echo "[provisioning] Pinning TRL / transformers..."
+# ── Pin TRL version ───────────────────────────────────────────────────────
+echo "[provisioning] Pinning TRL..."
 uv pip install --upgrade --no-deps tokenizers 'trl==0.22.2' unsloth unsloth_zoo
-uv pip install 'transformers==5.2.0'
 
 # ── Flash attention extensions ──────────────────────────────────────────────
 echo "[provisioning] Building flash-linear-attention + causal_conv1d (~10 min)..."
