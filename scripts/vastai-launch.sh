@@ -54,7 +54,7 @@ set -euo pipefail
 # ── Defaults ─────────────────────────────────────────────────────────────────
 QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.95'
 MAX_PRICE=2.0
-IMAGE="vastai/pytorch:2.8.0-cu128-cuda-12.9-mini-py310-2026-03-19"
+IMAGE="vastai/pytorch:2.8.0-cuda-12.8.1-py310-24.04-2026-03-19"
 DISK=50
 LABEL=""
 ONSTART_CMD=""
