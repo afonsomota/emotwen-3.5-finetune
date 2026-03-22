@@ -127,6 +127,12 @@ Key design decisions:
 - Config keys are prefixed (`sc_`, `aug_`) to avoid collisions
 - Model freed from GPU memory after each strategy finishes
 
+**Batching for GPU throughput:**
+Initial implementation was sequential (one conversation at a time) — completely underutilising the 4090. Switched to turn-synchronous batching: at each turn step, all active conversations are grouped into batches and generated together. Left-padding aligns generation start positions across variable-length prompts. Single-item fast path avoids padding overhead when batch shrinks to 1.
+
+**Why BF16 over 4-bit for generation?**
+For a 4B model on 24GB VRAM, 4-bit quantization would save memory we don't need (~3GB vs ~8GB). BF16 gives measurably better generation quality — quantization artifacts compound when the model is generating both sides of a conversation. The quality of synthetic training data directly impacts downstream fine-tune quality, so it's worth spending the extra VRAM.
+
 ## What's next
 
 - Run the multi-turn repetition experiments on Vast.ai
