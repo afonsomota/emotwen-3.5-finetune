@@ -258,7 +258,7 @@ def _load_model_and_tokenizer(
         )
         FastLanguageModel.for_inference(model)
         return model, tokenizer
-    except ImportError:
+    except Exception:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         model = AutoModelForCausalLM.from_pretrained(

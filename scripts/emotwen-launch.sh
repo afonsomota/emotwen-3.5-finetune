@@ -40,7 +40,7 @@
 #   emotwen-launch.sh --interactive --gpu 'gpu_name=A100_SXM4 num_gpus=1' --max-price 3.0
 #
 #   # Headless with cloud sync and config overrides
-#   emotwen-launch.sh --stage full_train --cloud-sync 52:/emotwen \
+#   emotwen-launch.sh --stage full_train --cloud-sync 38826:/emotwen/{run_id} \
 #     --overrides "max_empathetic=5000 stage1_max_steps=500"
 
 set -euo pipefail
@@ -53,10 +53,10 @@ STAGE="full_train"
 OVERRIDES=""
 INTERACTIVE=false
 BRANCH="$(git -C "$(dirname "$0")" rev-parse --abbrev-ref HEAD)"
-GPU_QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.90 verified=true'
+GPU_QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.90 verified=true geolocation!=CN'
 MAX_PRICE="0.5"
 DISK="50"
-CLOUD_SYNC=""      # connection_id:remote_path
+CLOUD_SYNC="38826:/emotwen/{run_id}"  # BlackblazeMain — connection_id:remote_path
 ENV_FILE=""
 DRY_RUN=false
 PROVISIONING_URL="https://raw.githubusercontent.com/afonsomota/emotwen-3.5-finetune/$BRANCH/docker/provisioning.sh"
