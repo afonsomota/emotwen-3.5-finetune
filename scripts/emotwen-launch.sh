@@ -53,9 +53,9 @@ STAGE="full_train"
 OVERRIDES=""
 INTERACTIVE=false
 BRANCH="$(git -C "$(dirname "$0")" rev-parse --abbrev-ref HEAD)"
-GPU_QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.90 verified=true geolocation!=CN'
+GPU_QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.90 verified=true geolocation!=CN cpu_ram>=32'
 MAX_PRICE="0.5"
-DISK="50"
+DISK="100"
 CLOUD_SYNC="38826:/emotwen/{run_id}"  # BlackblazeMain — connection_id:remote_path
 ENV_FILE=""
 DRY_RUN=false
