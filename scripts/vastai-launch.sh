@@ -196,7 +196,8 @@ CREATE_OUTPUT=$("${CMD[@]}" 2>&1) || {
 
 echo "$CREATE_OUTPUT"
 
-INSTANCE_ID=$(echo "$CREATE_OUTPUT" | grep -oP 'new contract\s+\K\d+' || echo "$CREATE_OUTPUT" | grep -oP '\d+' | head -1)
+INSTANCE_ID=$(echo "$CREATE_OUTPUT" | sed -n "s/.*'new_contract': \([0-9]*\).*/\1/p" | head -1)
+[[ -z "$INSTANCE_ID" ]] && INSTANCE_ID=$(echo "$CREATE_OUTPUT" | grep -oE '[0-9]+' | head -1)
 
 echo ""
 echo "════════════════════════════════════════════════════════════"

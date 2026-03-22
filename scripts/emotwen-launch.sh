@@ -106,9 +106,10 @@ LAUNCH_ARGS+=(--max-price "$MAX_PRICE")
 LAUNCH_ARGS+=(--disk "$DISK")
 LAUNCH_ARGS+=(--label "emotwen-$STAGE")
 
-# Provisioning script
+# Provisioning script — download and execute on instance start
 LAUNCH_ARGS+=(--env "PROVISIONING_SCRIPT=$PROVISIONING_URL")
 LAUNCH_ARGS+=(--env "REPO_BRANCH=$BRANCH")
+LAUNCH_ARGS+=(--onstart-cmd "bash -c 'curl -fsSL \$PROVISIONING_SCRIPT | bash'")
 
 # Headless config
 if ! $INTERACTIVE; then
