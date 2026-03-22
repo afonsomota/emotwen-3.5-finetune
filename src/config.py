@@ -290,6 +290,85 @@ class GenerateMultiTurnConfig:
 
     random_seed: int = 42
 
+
+# ─── Self-chat generation config ─────────────────────────────────────────────
+
+@dataclass
+class SelfChatConfig:
+    """Config for generating multi-turn conversations via model self-chat.
+
+    Uses a local Qwen 3.5 4B model to play both user and assistant roles,
+    producing 3-5 turn empathetic journal conversations at scale.
+    GPU required.
+    """
+    # Model to use for self-chat generation
+    model_id: str = "unsloth/Qwen3.5-4B"
+    # BF16 (no quantization) is best for RTX 4090 — 4B model fits in 24GB
+    # easily (~8GB), and full precision gives best generation quality.
+    # Set to True for 4-bit if running on a smaller GPU (e.g. T4 16GB).
+    load_in_4bit: bool = False
+    dtype: str = "bfloat16"  # "bfloat16", "float16", or "auto"
+
+    # Number of conversations to generate
+    n_conversations: int = 3000
+
+    # Turn range per conversation (inclusive)
+    min_turns: int = 3
+    max_turns: int = 5
+
+    # Generation parameters
+    max_new_tokens: int = 150
+    temperature: float = 0.8
+    top_p: float = 0.9
+
+    # Batch size for generation (adjust for GPU memory)
+    batch_size: int = 8
+
+    # Fraction of conversations to use RAG-injected system prompt
+    rag_injection_fraction: float = 0.30
+
+    random_seed: int = 42
+
+
+# ─── Conversation augmentation config ────────────────────────────────────────
+
+@dataclass
+class ConversationAugmentConfig:
+    """Config for augmenting existing real conversations with additional turns.
+
+    Extends empathetic_dialogues conversations by generating 1-2 more
+    user-assistant turns using an LLM (local model or API).
+    """
+    # Source dataset to augment
+    source_dataset_id: str = "Estwld/empathetic_dialogues_llm"
+
+    # Number of conversations to augment (sampled from source)
+    n_conversations: int = 2000
+
+    # Extra turns to add per conversation
+    min_extra_turns: int = 1
+    max_extra_turns: int = 2
+
+    # Model backend: "local" for local GPU, "openai", or "anthropic"
+    backend: str = "local"
+
+    # Local model (used when backend="local")
+    local_model_id: str = "unsloth/Qwen3.5-4B"
+    load_in_4bit: bool = False
+    dtype: str = "bfloat16"
+
+    # API model (used when backend="openai" or "anthropic")
+    api_model: str = "gpt-4o-mini"
+
+    # Generation parameters
+    max_new_tokens: int = 150
+    temperature: float = 0.8
+    top_p: float = 0.9
+
+    batch_size: int = 8
+    random_seed: int = 42
+
+
 # ─── W&B config ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -310,4 +389,6 @@ DEFAULT_MULTI_TURN_EVAL_CONFIG = MultiTurnEvalConfig()
 DEFAULT_GRPO_LORA_CONFIG = GRPOLoraConfig()
 DEFAULT_GRPO_TRAIN_CONFIG = GRPOTrainConfig()
 DEFAULT_GENERATE_MT_CONFIG = GenerateMultiTurnConfig()
+DEFAULT_SELF_CHAT_CONFIG = SelfChatConfig()
+DEFAULT_CONVERSATION_AUGMENT_CONFIG = ConversationAugmentConfig()
 DEFAULT_WANDB_CONFIG = WandbConfig()

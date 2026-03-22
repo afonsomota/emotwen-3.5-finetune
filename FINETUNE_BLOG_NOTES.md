@@ -101,9 +101,37 @@ Added `main.py` as a CLI entry point for running stages:
 
 ---
 
+## 13. LLM-powered data generation strategies
+
+Added two new generation strategies to `generate_multi_turn.py` to massively scale multi-turn training data:
+
+**Self-chat via local Qwen 3.5 4B:**
+- Model plays both user and assistant roles in 3-5 turn conversations
+- Emotion-seeded: ~40 seed prompts across 9 emotion categories
+- User role gets a separate system prompt instructing it to write as a journal author
+- Conversations filtered for advice and validated for minimum turn count
+- BF16 on RTX 4090 — no quantization needed for 4B model (~8GB VRAM)
+- Target: 3000 conversations (configurable)
+
+**Conversation augmentation (extending empathetic_dialogues):**
+- Takes real empathetic_dialogues conversations and adds 1-2 extra user-assistant turns
+- Supports local model (Qwen 3.5 4B) or API (OpenAI/Anthropic) backends
+- Filters out advice in generated assistant turns
+- Target: 2000 augmented conversations
+
+Both are opt-in via `enable_self_chat=True` and `enable_augmentation=True` in config. Template-based generation (CPU) still runs by default.
+
+Key design decisions:
+- Self-chat and augmentation share the same model loading code (BF16 Unsloth → HF fallback)
+- Both use the standard `has_advice()` filter on generated assistant turns
+- Config keys are prefixed (`sc_`, `aug_`) to avoid collisions
+- Model freed from GPU memory after each strategy finishes
+
 ## What's next
 
 - Run the multi-turn repetition experiments on Vast.ai
 - Evaluate whether GRPO repetition reward helps
 - Try context extension beyond 1024 tokens
 - Consider inference-time repetition penalty as a quick win
+- Benchmark self-chat quality vs template quality
+- Tune self-chat generation temperature for diversity vs coherence

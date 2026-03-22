@@ -9,6 +9,9 @@ Fine-tunes **Qwen 3.5 (0.8B)** into an empathetic journal companion chatbot (Emo
 ```
 Seed Datasets (HuggingFace Hub)
     ↓ src/generate_multi_turn.py   (run once, or when regenerating)
+    │  ├─ Template-based multi-turn extension (CPU)
+    │  ├─ Self-chat via Qwen 3.5 4B (GPU) — 3-5 turn conversations
+    │  └─ Conversation augmentation (GPU/API) — extends empathetic_dialogues
 HF Hub: brianist/emotwen-3.5-synthetic
     ↓ src/data_prep.py             (loads synthetic from Hub + real datasets)
 data/sft_train, sft_val, eval_200
@@ -28,20 +31,22 @@ All stages are Colab notebooks. Run them in order:
 
 | Notebook | Stage | GPU needed |
 |---|---|---|
-| `nb/00_generate_multi_turn.ipynb` | Synthetic multi-turn generation → HF Hub | No (CPU) |
+| `nb/00_generate_multi_turn.ipynb` | Synthetic multi-turn generation → HF Hub | Template: No (CPU); Self-chat/augment: Yes (RTX 4090) |
 | `nb/01_data_prep.ipynb` | Data preparation (loads synthetic from Hub) | No (CPU) |
 | `nb/02_sft_train.ipynb` | SFT Stage 1 + 2 | Yes (T4+) |
 | `nb/03_eval.ipynb` | Evaluation + multi-turn eval + GRPO decision | Yes |
 | `nb/04_grpo.ipynb` | GRPO (if triggered) | Yes |
 
 > **Note:** Step 00 only needs to be re-run when you change templates, seed counts, or generation strategy. The published HF dataset is reused across data prep runs.
+>
+> **GPU note:** Self-chat and conversation augmentation use Qwen 3.5 4B in BF16 (~8GB VRAM). RTX 4090 (24GB) is the target GPU — no quantization needed for best generation quality. Set `sc_load_in_4bit=True` for smaller GPUs.
 
 ## Source Layout
 
 ```
 src/
   config.py              # All hyperparams, system prompts, dataset IDs — edit here first
-  generate_multi_turn.py # Standalone synthetic multi-turn generator → HF Hub
+  generate_multi_turn.py # Synthetic multi-turn: templates + self-chat + augmentation → HF Hub
   data_prep.py           # Dataset loading, filtering, mixing (loads synthetic from Hub)
   train_sft.py           # Two-stage supervised fine-tuning
   train_grpo.py          # GRPO reinforcement learning
@@ -54,6 +59,8 @@ src/
 Everything is in `src/config.py`. Key dataclasses:
 
 - `GenerateMultiTurnConfig` — HF Hub repo, seed dataset sizes, extension fraction
+- `SelfChatConfig` — model, n_conversations, turn range, dtype (BF16 default for RTX 4090)
+- `ConversationAugmentConfig` — source dataset, backend (local/openai/anthropic), n_conversations
 - `DataConfig` — dataset IDs, max samples per source, RAG fraction, `synthetic_hub_id`
 - `SFTStage1Config` / `SFTStage2Config` — LR, steps, batch size per stage
 - `EvalConfig` — temperature, LLM judge model
