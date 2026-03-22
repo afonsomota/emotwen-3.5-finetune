@@ -14,13 +14,14 @@
 #                                  full_train, full_train_with_gen
 #   --overrides ARGS       Config overrides, space-separated key=val
 #   --interactive          Launch in Jupyter+SSH mode (no auto-run)
-#   --branch BRANCH        Git branch to clone (default: main)
+#   --branch BRANCH        Git branch to clone (default: current branch)
 #   --gpu QUERY            GPU search query (default: 'gpu_name=RTX_4090 num_gpus=1 reliability>0.95')
 #   --max-price PRICE      Max $/hr (default: 2.0)
 #   --disk DISK            Disk space in GB (default: 50)
-#   --cloud-sync CONN:PATH Cloud sync — connection_id:remote_path (e.g. 52:/emotwen)
+#   --cloud-sync CONN:PATH Cloud sync — connection_id:remote_path (e.g. 52:/emotwen/{run_id})
 #                          Provider is auto-detected from your vast.ai connection.
 #                          Syncs outputs/ and data/ before and after the job.
+#                          Use {run_id} in the path to get a unique timestamp per run.
 #   --env-file FILE        Extra env vars file (default: .env if it exists)
 #   --dry-run              Show what would be launched without creating
 #
@@ -51,9 +52,9 @@ GENERIC_LAUNCHER="$SCRIPT_DIR/vastai-launch.sh"
 STAGE="full_train"
 OVERRIDES=""
 INTERACTIVE=false
-BRANCH="main"
-GPU_QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.95'
-MAX_PRICE="2.0"
+BRANCH="$(git -C "$(dirname "$0")" rev-parse --abbrev-ref HEAD)"
+GPU_QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.95 verified=true'
+MAX_PRICE="0.5"
 DISK="50"
 CLOUD_SYNC=""      # connection_id:remote_path
 ENV_FILE=""
@@ -89,6 +90,12 @@ if ! echo "$VALID_STAGES" | grep -qw "$STAGE"; then
     exit 1
 fi
 
+# ── Warn if there are uncommitted changes ────────────────────────────────────
+if ! git -C "$SCRIPT_DIR" diff --quiet HEAD 2>/dev/null; then
+    echo "⚠️  WARNING: You have uncommitted changes. The remote instance will clone" >&2
+    echo "   branch '$BRANCH' from GitHub, which may not include your local changes." >&2
+fi
+
 # ── Re-derive provisioning URL if branch changed ────────────────────────────
 PROVISIONING_URL="https://raw.githubusercontent.com/afonsomota/emotwen-3.5-finetune/$BRANCH/docker/provisioning.sh"
 
@@ -118,6 +125,9 @@ fi
 if [[ -n "$CLOUD_SYNC" ]]; then
     SYNC_CONNECTION="${CLOUD_SYNC%%:*}"
     SYNC_PATH="${CLOUD_SYNC#*:}"
+    # Replace {run_id} placeholder with a unique timestamp-based ID
+    RUN_ID="$(date +%Y%m%d-%H%M%S)"
+    SYNC_PATH="${SYNC_PATH//\{run_id\}/$RUN_ID}"
     if [[ "$SYNC_CONNECTION" == "$CLOUD_SYNC" ]]; then
         echo "Error: --cloud-sync must be CONNECTION_ID:PATH (e.g. 52:/emotwen)" >&2
         exit 1
@@ -125,7 +135,10 @@ if [[ -n "$CLOUD_SYNC" ]]; then
     LAUNCH_ARGS+=(--env "CLOUD_SYNC_CONNECTION=$SYNC_CONNECTION")
     LAUNCH_ARGS+=(--env "CLOUD_SYNC_PATH=$SYNC_PATH")
 
-    # Cloud sync needs the full API key
+    # Cloud sync needs the full API key — fall back to vastai CLI cache
+    if [[ -z "${VAST_API_KEY:-}" ]] && [[ -f "$HOME/.config/vastai/vast_api_key" ]]; then
+        VAST_API_KEY="$(cat "$HOME/.config/vastai/vast_api_key")"
+    fi
     if [[ -n "${VAST_API_KEY:-}" ]]; then
         LAUNCH_ARGS+=(--env "VAST_API_KEY=$VAST_API_KEY")
     else
@@ -135,6 +148,10 @@ fi
 
 # Pass through API keys from environment
 [[ -n "${WANDB_API_KEY:-}" ]]     && LAUNCH_ARGS+=(--env "WANDB_API_KEY=$WANDB_API_KEY")
+# Fall back to the token cached by `huggingface-cli login`
+if [[ -z "${HF_TOKEN:-}" ]] && [[ -f "$HOME/.cache/huggingface/token" ]]; then
+    HF_TOKEN="$(cat "$HOME/.cache/huggingface/token")"
+fi
 [[ -n "${HF_TOKEN:-}" ]]          && LAUNCH_ARGS+=(--env "HF_TOKEN=$HF_TOKEN")
 [[ -n "${OPENAI_API_KEY:-}" ]]    && LAUNCH_ARGS+=(--env "OPENAI_API_KEY=$OPENAI_API_KEY")
 [[ -n "${ANTHROPIC_API_KEY:-}" ]] && LAUNCH_ARGS+=(--env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
