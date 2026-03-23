@@ -23,6 +23,8 @@
 #                          Syncs outputs/ and data/ before and after the job.
 #                          Use {run_id} in the path to get a unique timestamp per run.
 #   --env-file FILE        Extra env vars file (default: .env if it exists)
+#   --insecure             Allow unverified GPU providers (removes verified=true filter)
+#   --no-token-push        Don't push API keys to the instance (for interactive auth)
 #   --dry-run              Show what would be launched without creating
 #
 # Environment variables (set these or put them in .env):
@@ -59,6 +61,8 @@ DISK="100"
 CLOUD_SYNC="38826:/emotwen/{run_id}"  # BlackblazeMain — connection_id:remote_path
 ENV_FILE=""
 DRY_RUN=false
+INSECURE=false
+NO_TOKEN_PUSH=false
 PROVISIONING_URL="https://raw.githubusercontent.com/afonsomota/emotwen-3.5-finetune/$BRANCH/docker/provisioning.sh"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
@@ -73,7 +77,9 @@ while [[ $# -gt 0 ]]; do
         --disk)         DISK="$2";        shift 2 ;;
         --cloud-sync)   CLOUD_SYNC="$2";  shift 2 ;;
         --env-file)     ENV_FILE="$2";    shift 2 ;;
-        --dry-run)      DRY_RUN=true;     shift ;;
+        --dry-run)      DRY_RUN=true;       shift ;;
+        --insecure)     INSECURE=true;      shift ;;
+        --no-token-push) NO_TOKEN_PUSH=true; shift ;;
         -h|--help)
             head -42 "$0" | tail -n +2 | sed 's/^# \?//'
             exit 0 ;;
@@ -88,6 +94,11 @@ if ! echo "$VALID_STAGES" | grep -qw "$STAGE"; then
     echo "Invalid stage: $STAGE" >&2
     echo "Valid stages: $VALID_STAGES" >&2
     exit 1
+fi
+
+# ── Apply --insecure: allow unverified providers ─────────────────────────────
+if $INSECURE; then
+    GPU_QUERY="${GPU_QUERY// verified=true/}"
 fi
 
 # ── Warn if there are uncommitted changes ────────────────────────────────────
@@ -119,11 +130,17 @@ if ! $INTERACTIVE; then
 fi
 
 if $INTERACTIVE; then
-    LAUNCH_ARGS+=(--ssh --direct)
+    LAUNCH_ARGS+=(--jupyter --jupyter-lab --ssh --direct)
+    LAUNCH_ARGS+=(--env "-p 1111:1111 -p 6006:6006 -p 8080:8080 -p 8384:8384")
+    LAUNCH_ARGS+=(--env "OPEN_BUTTON_PORT=1111")
+    LAUNCH_ARGS+=(--env "OPEN_BUTTON_TOKEN=1")
+    LAUNCH_ARGS+=(--env "JUPYTER_DIR=/")
+    LAUNCH_ARGS+=(--env "DATA_DIRECTORY=/workspace/")
+    LAUNCH_ARGS+=(--env 'PORTAL_CONFIG=localhost:1111:11111:/:Instance Portal|localhost:8080:18080:/:Jupyter|localhost:8080:8080:/terminals/1:Jupyter Terminal|localhost:8384:18384:/:Syncthing|localhost:6006:16006:/:Tensorboard')
 fi
 
-# Cloud sync
-if [[ -n "$CLOUD_SYNC" ]]; then
+# Cloud sync (skip if --no-token-push — cloud sync requires API key)
+if [[ -n "$CLOUD_SYNC" ]] && ! $NO_TOKEN_PUSH; then
     SYNC_CONNECTION="${CLOUD_SYNC%%:*}"
     SYNC_PATH="${CLOUD_SYNC#*:}"
     # Replace {run_id} placeholder with a unique timestamp-based ID
@@ -145,17 +162,21 @@ if [[ -n "$CLOUD_SYNC" ]]; then
     else
         echo "Warning: VAST_API_KEY not set. Cloud sync may fail without the full API key." >&2
     fi
+elif [[ -n "$CLOUD_SYNC" ]] && $NO_TOKEN_PUSH; then
+    echo "Note: Cloud sync skipped (--no-token-push prevents sending API key to instance)." >&2
 fi
 
-# Pass through API keys from environment
-[[ -n "${WANDB_API_KEY:-}" ]]     && LAUNCH_ARGS+=(--env "WANDB_API_KEY=$WANDB_API_KEY")
-# Fall back to the token cached by `huggingface-cli login`
-if [[ -z "${HF_TOKEN:-}" ]] && [[ -f "$HOME/.cache/huggingface/token" ]]; then
-    HF_TOKEN="$(cat "$HOME/.cache/huggingface/token")"
+# Pass through API keys (unless --no-token-push)
+if ! $NO_TOKEN_PUSH; then
+    [[ -n "${WANDB_API_KEY:-}" ]]     && LAUNCH_ARGS+=(--env "WANDB_API_KEY=$WANDB_API_KEY")
+    # Fall back to the token cached by `huggingface-cli login`
+    if [[ -z "${HF_TOKEN:-}" ]] && [[ -f "$HOME/.cache/huggingface/token" ]]; then
+        HF_TOKEN="$(cat "$HOME/.cache/huggingface/token")"
+    fi
+    [[ -n "${HF_TOKEN:-}" ]]          && LAUNCH_ARGS+=(--env "HF_TOKEN=$HF_TOKEN")
+    [[ -n "${OPENAI_API_KEY:-}" ]]    && LAUNCH_ARGS+=(--env "OPENAI_API_KEY=$OPENAI_API_KEY")
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && LAUNCH_ARGS+=(--env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
 fi
-[[ -n "${HF_TOKEN:-}" ]]          && LAUNCH_ARGS+=(--env "HF_TOKEN=$HF_TOKEN")
-[[ -n "${OPENAI_API_KEY:-}" ]]    && LAUNCH_ARGS+=(--env "OPENAI_API_KEY=$OPENAI_API_KEY")
-[[ -n "${ANTHROPIC_API_KEY:-}" ]] && LAUNCH_ARGS+=(--env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
 
 # Extra env file
 if [[ -n "$ENV_FILE" ]]; then
@@ -170,7 +191,7 @@ $DRY_RUN && LAUNCH_ARGS+=(--dry-run)
 echo "EmotWen — Launching $STAGE on vast.ai"
 echo "  Branch: $BRANCH"
 echo "  Mode:   $($INTERACTIVE && echo "interactive" || echo "headless")"
-[[ -n "$CLOUD_SYNC" ]] && echo "  Sync:   connection=$SYNC_CONNECTION path=$SYNC_PATH"
+[[ -n "${SYNC_CONNECTION:-}" ]] && echo "  Sync:   connection=$SYNC_CONNECTION path=$SYNC_PATH"
 [[ -n "$OVERRIDES" ]]  && echo "  Config: $OVERRIDES"
 echo ""
 
