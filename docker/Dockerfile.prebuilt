@@ -1,0 +1,36 @@
+# EmotWen pre-built image — all deps baked in, including flash-attn.
+#
+# Base: vastai/pytorch with CUDA 12.8.1 (auto-selects PyTorch + Python).
+# Does NOT override the entrypoint — vast.ai's entrypoint is preserved.
+#
+# Build (requires GPU for CUDA kernel compilation):
+#   docker build -f docker/Dockerfile.prebuilt -t emotwen-prebuilt .
+#
+FROM vastai/pytorch:cuda-12.8.1-auto
+
+# ── Install uv ───────────────────────────────────────────────────────────────
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# ── Unsloth + Zoo ────────────────────────────────────────────────────────────
+RUN uv pip install --system \
+    'unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo' \
+    'unsloth[base] @ git+https://github.com/unslothai/unsloth'
+
+# ── Pin TRL ──────────────────────────────────────────────────────────────────
+RUN uv pip install --system --upgrade --no-deps tokenizers 'trl==0.22.2' unsloth unsloth_zoo
+
+# ── Flash Attention 2 (CUDA compilation — needs GPU at build time) ───────────
+RUN uv pip install --system --no-build-isolation flash-attn
+
+# ── Flash Linear Attention + causal_conv1d ───────────────────────────────────
+RUN uv pip install --system --no-build-isolation flash-linear-attention 'causal_conv1d==1.6.0'
+
+# ── Data, tracking, optional packages ────────────────────────────────────────
+RUN uv pip install --system \
+    wandb datasets nltk huggingface_hub tqdm \
+    openai anthropic sentence-transformers bitsandbytes
+
+# ── NLTK data ────────────────────────────────────────────────────────────────
+RUN python -c "import nltk; nltk.download('punkt_tab', download_dir='/opt/nltk_data')"
+ENV NLTK_DATA=/opt/nltk_data
