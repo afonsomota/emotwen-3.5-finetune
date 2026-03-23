@@ -54,11 +54,13 @@ set -euo pipefail
 # ── Defaults ─────────────────────────────────────────────────────────────────
 QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.95'
 MAX_PRICE=2.0
-IMAGE="vastai/pytorch:2.8.0-cuda-12.8.1-22.04"
+IMAGE="vastai/pytorch:2.8.0-cuda-12.9.1-24.04-2026-03-19"
 DISK=50
 LABEL=""
 ONSTART_CMD=""
-MODE="--jupyter"
+JUPYTER=true
+SSH=false
+JUPYTER_LAB=false
 DIRECT=""
 DRY_RUN=false
 declare -a ENV_PAIRS=()
@@ -73,8 +75,10 @@ while [[ $# -gt 0 ]]; do
         --disk)         DISK="$2";         shift 2 ;;
         --label)        LABEL="$2";        shift 2 ;;
         --onstart-cmd)  ONSTART_CMD="$2";  shift 2 ;;
-        --ssh)          MODE="--ssh";      shift ;;
-        --direct)       DIRECT="--direct"; shift ;;
+        --ssh)          SSH=true;            shift ;;
+        --jupyter)      JUPYTER=true;        shift ;;
+        --jupyter-lab)  JUPYTER_LAB=true;    shift ;;
+        --direct)       DIRECT="--direct";   shift ;;
         --dry-run)      DRY_RUN=true;      shift ;;
         --env)
             ENV_PAIRS+=("$2")
@@ -126,7 +130,11 @@ fi
 # ── Build env string ─────────────────────────────────────────────────────────
 ENV_STR=""
 for pair in "${ENV_PAIRS[@]}"; do
-    ENV_STR+=" -e $pair"
+    if [[ "$pair" == -p* ]]; then
+        ENV_STR+=" $pair"
+    else
+        ENV_STR+=" -e $pair"
+    fi
 done
 
 # ── Search for offers ────────────────────────────────────────────────────────
@@ -160,9 +168,11 @@ echo "Best offer: #$OFFER_ID  ($OFFER_PRICE)"
 CMD=(vastai create instance "$OFFER_ID"
      --image "$IMAGE"
      --disk "$DISK"
-     $MODE
 )
-[[ -n "$DIRECT" ]]      && CMD+=($DIRECT)
+$JUPYTER                 && CMD+=(--jupyter)
+$SSH                     && CMD+=(--ssh)
+$JUPYTER_LAB             && CMD+=(--jupyter-lab)
+[[ -n "$DIRECT" ]]       && CMD+=($DIRECT)
 [[ -n "$ENV_STR" ]]      && CMD+=(--env "$ENV_STR")
 [[ -n "$LABEL" ]]        && CMD+=(--label "$LABEL")
 [[ -n "$ONSTART_CMD" ]]  && CMD+=(--onstart-cmd "$ONSTART_CMD")
