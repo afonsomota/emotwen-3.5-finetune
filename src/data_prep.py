@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 import wandb
-from datasets import Dataset, load_dataset
+from datasets import ClassLabel, Dataset, load_dataset
 
 from src.config import (
     SYSTEM_PROMPT_BASE,
@@ -587,7 +587,7 @@ def _go_emotions_to_messages(
     rag_fraction: float,
     rag_pool: dict[str, list[str]],
     rng: random.Random,
-    label_feature: object | None = None,
+    label_feature: ClassLabel | None = None,
     source_tag: str = "go_emotions_synthetic",
 ) -> list[dict]:
     """Create synthetic single-turn journal conversations from go_emotions."""
