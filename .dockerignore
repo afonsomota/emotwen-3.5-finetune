@@ -1,0 +1,35 @@
+# Training artifacts
+data/
+outputs/
+
+# Git history
+.git/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Source (cloned at runtime, not baked into the image)
+src/
+nb/
+main.py
+requirements.txt
+*.md
+LICENSE
+kernel-metadata.json
+
+# Environment / secrets
+.env
+.envrc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+.cursor*
+
+# OS
+.DS_Store

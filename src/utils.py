@@ -1,10 +1,12 @@
 """
 Shared utilities: sentence counting, advice detection, reward functions,
-and chat template helpers.
+multi-turn eval metrics, and chat template helpers.
 """
 
 import re
+import math
 import nltk
+from collections import Counter
 from typing import Any
 
 from src.config import ADVICE_REGEX_PATTERN
@@ -73,6 +75,107 @@ def has_advice(text: str) -> bool:
 def count_advice_matches(text: str) -> int:
     """Return number of distinct advice-pattern matches in text."""
     return len(_ADVICE_RE.findall(text))
+
+# ─── Multi-turn evaluation metrics ───────────────────────────────────────────
+
+def _ngrams(tokens: list[str], n: int) -> Counter:
+    """Extract n-gram counts from a token list."""
+    return Counter(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
+
+
+def self_bleu(response_a: str, response_b: str, max_n: int = 4) -> float:
+    """
+    BLEU-like n-gram overlap between two responses.
+
+    Returns a score in [0, 1]. Values above 0.6 indicate near-copies.
+    Uses geometric mean of 1-gram through max_n-gram precisions, clipped
+    so that a single zero precision doesn't collapse the whole score.
+    """
+    tokens_a = response_a.lower().split()
+    tokens_b = response_b.lower().split()
+    if len(tokens_a) < max_n or len(tokens_b) < max_n:
+        return 0.0
+
+    precisions = []
+    for n in range(1, max_n + 1):
+        ng_a = _ngrams(tokens_a, n)
+        ng_b = _ngrams(tokens_b, n)
+        overlap = sum((ng_a & ng_b).values())
+        total = sum(ng_a.values())
+        precisions.append(overlap / total if total > 0 else 0.0)
+
+    # Geometric mean; clip individual precisions at 1e-9 to avoid log(0)
+    log_avg = sum(math.log(max(p, 1e-9)) for p in precisions) / len(precisions)
+    return math.exp(log_avg)
+
+
+def pairwise_self_bleu(assistant_turns: list[str], max_n: int = 4) -> dict:
+    """
+    Compute self-BLEU between all pairs of assistant turns in a conversation.
+
+    Returns
+    -------
+    dict with keys:
+        mean_self_bleu  — average across all pairs
+        max_self_bleu   — highest single-pair score
+        consecutive     — list of self-BLEU between turn i and turn i+1
+    """
+    if len(assistant_turns) < 2:
+        return {"mean_self_bleu": 0.0, "max_self_bleu": 0.0, "consecutive": []}
+
+    all_scores = []
+    consecutive = []
+    for i in range(len(assistant_turns)):
+        for j in range(i + 1, len(assistant_turns)):
+            score = self_bleu(assistant_turns[i], assistant_turns[j], max_n)
+            all_scores.append(score)
+            if j == i + 1:
+                consecutive.append(score)
+
+    return {
+        "mean_self_bleu": sum(all_scores) / len(all_scores) if all_scores else 0.0,
+        "max_self_bleu": max(all_scores) if all_scores else 0.0,
+        "consecutive": consecutive,
+    }
+
+
+def longest_common_substring_tokens(a: str, b: str) -> int:
+    """
+    Length of the longest common contiguous token-level substring.
+
+    Uses standard DP. O(n*m) where n, m are token counts — fine for
+    responses under 200 tokens.
+    """
+    tokens_a = a.lower().split()
+    tokens_b = b.lower().split()
+    if not tokens_a or not tokens_b:
+        return 0
+
+    # Optimised: only keep current and previous row
+    prev = [0] * (len(tokens_b) + 1)
+    best = 0
+    for i in range(1, len(tokens_a) + 1):
+        curr = [0] * (len(tokens_b) + 1)
+        for j in range(1, len(tokens_b) + 1):
+            if tokens_a[i - 1] == tokens_b[j - 1]:
+                curr[j] = prev[j - 1] + 1
+                if curr[j] > best:
+                    best = curr[j]
+        prev = curr
+    return best
+
+
+def exact_repeat_check(
+    response: str,
+    prior_assistant_turns: list[str],
+    threshold: int = 10,
+) -> bool:
+    """Return True if *response* shares a ≥threshold-token substring with any prior turn."""
+    for prior in prior_assistant_turns:
+        if longest_common_substring_tokens(response, prior) >= threshold:
+            return True
+    return False
+
 
 # ─── GRPO reward functions ───────────────────────────────────────────────────
 

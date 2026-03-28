@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+#
+# Generic vast.ai instance launcher.
+#
+# Usage:
+#   vastai-launch.sh [options]
+#
+# Options:
+#   --query QUERY          Vast.ai search query (default: 'gpu_name=RTX_4090 num_gpus=1 reliability>0.95')
+#   --max-price PRICE      Max $/hr (default: 2.0)
+#   --image IMAGE          Docker image (default: vastai/pytorch — the PyTorch template)
+#   --disk DISK            Disk space in GB (default: 50)
+#   --env KEY=VAL          Environment variable (repeatable)
+#   --env-file FILE        Load KEY=VAL lines from file (skips blanks and #comments)
+#   --sync CONN:SRC:DST[:MODE]  Cloud sync mount (repeatable, like -v in Docker).
+#                          MODE controls sync direction (default: rw):
+#                            rw   — download before + upload after (bidirectional)
+#                            down — download before only (input data, weights)
+#                            up   — upload after only (fresh outputs)
+#                          CONN = vast.ai cloud connection ID (from account page)
+#                          SRC  = path in cloud storage
+#                          DST  = absolute path on the instance
+#   --onstart-cmd CMD      Command to run on instance start
+#   --label LABEL          Instance label
+#   --ssh                  Launch in SSH mode (default: jupyter)
+#   --direct               Use direct (non-proxy) connections
+#   --dry-run              Print the create command without executing
+#
+# Cloud sync requires VAST_API_KEY in the environment (full API key, not
+# the limited CONTAINER_API_KEY). It is passed to the instance automatically.
+#
+# Requires: vastai CLI configured with `vastai set api-key <KEY>`
+#
+# Examples:
+#   # Launch with defaults (cheapest RTX 4090, Jupyter mode)
+#   ./vastai-launch.sh --env WANDB_API_KEY=xxx
+#
+#   # Custom GPU, SSH mode, provisioning script
+#   ./vastai-launch.sh \
+#     --query 'gpu_name=A100_SXM4 num_gpus=1' \
+#     --max-price 3.0 --disk 100 --ssh --direct \
+#     --env PROVISIONING_SCRIPT=https://example.com/setup.sh \
+#     --env WANDB_API_KEY=xxx
+#
+#   # With cloud sync (persist outputs, read-only data)
+#   ./vastai-launch.sh \
+#     --sync 52:/myproject/outputs:/workspace/myproject/outputs:up \
+#     --sync 52:/myproject/data:/workspace/myproject/data:down \
+#     --sync 52:/myproject/checkpoints:/workspace/myproject/checkpoints \
+#     --env PROVISIONING_SCRIPT=https://example.com/setup.sh
+
+set -euo pipefail
+
+# ── Defaults ─────────────────────────────────────────────────────────────────
+QUERY='gpu_name=RTX_4090 num_gpus=1 reliability>0.95'
+MAX_PRICE=2.0
+IMAGE="vastai/pytorch:2.8.0-cuda-12.9.1-24.04-2026-03-19"
+DISK=50
+LABEL=""
+ONSTART_CMD=""
+JUPYTER=true
+SSH=false
+JUPYTER_LAB=false
+DIRECT=""
+DRY_RUN=false
+declare -a ENV_PAIRS=()
+declare -a SYNC_MOUNTS=()
+
+# ── Parse arguments ──────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --query)        QUERY="$2";        shift 2 ;;
+        --max-price)    MAX_PRICE="$2";    shift 2 ;;
+        --image)        IMAGE="$2";        shift 2 ;;
+        --disk)         DISK="$2";         shift 2 ;;
+        --label)        LABEL="$2";        shift 2 ;;
+        --onstart-cmd)  ONSTART_CMD="$2";  shift 2 ;;
+        --ssh)          SSH=true;            shift ;;
+        --jupyter)      JUPYTER=true;        shift ;;
+        --jupyter-lab)  JUPYTER_LAB=true;    shift ;;
+        --direct)       DIRECT="--direct";   shift ;;
+        --dry-run)      DRY_RUN=true;      shift ;;
+        --env)
+            ENV_PAIRS+=("$2")
+            shift 2 ;;
+        --env-file)
+            while IFS= read -r line; do
+                [[ -z "$line" || "$line" == \#* ]] && continue
+                ENV_PAIRS+=("$line")
+            done < "$2"
+            shift 2 ;;
+        --sync)
+            # Validate format: CONN:SRC:DST[:MODE]
+            if [[ ! "$2" =~ ^[^:]+:[^:]+:[^:]+(:(rw|down|up))?$ ]]; then
+                echo "Error: --sync must be CONN:REMOTE:LOCAL[:MODE]" >&2
+                echo "  MODE = rw (default), down, or up" >&2
+                echo "  e.g. 52:/myproject/outputs:/workspace/outputs:up" >&2
+                exit 1
+            fi
+            # Append default mode if not specified
+            mount="$2"
+            if [[ ! "$mount" =~ :(rw|down|up)$ ]]; then
+                mount="$mount:rw"
+            fi
+            SYNC_MOUNTS+=("$mount")
+            shift 2 ;;
+        -h|--help)
+            head -49 "$0" | tail -n +2 | sed 's/^# \?//'
+            exit 0 ;;
+        *)
+            echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+# ── Pack sync mounts into env var ────────────────────────────────────────────
+# Format: pipe-separated list of CONN:SRC:DST:MODE entries
+# MODE = rw|down|up. The provisioning script parses this to sync before/after.
+if [[ ${#SYNC_MOUNTS[@]} -gt 0 ]]; then
+    MOUNTS_STR=$(IFS='|'; echo "${SYNC_MOUNTS[*]}")
+    ENV_PAIRS+=("CLOUD_SYNC_MOUNTS=$MOUNTS_STR")
+
+    # Cloud sync needs the full API key on the instance
+    if [[ -n "${VAST_API_KEY:-}" ]]; then
+        ENV_PAIRS+=("VAST_API_KEY=$VAST_API_KEY")
+    else
+        echo "Warning: VAST_API_KEY not set. Cloud sync requires the full vast.ai API key." >&2
+    fi
+fi
+
+# ── Build env string ─────────────────────────────────────────────────────────
+ENV_STR=""
+for pair in "${ENV_PAIRS[@]}"; do
+    if [[ "$pair" == -p* ]]; then
+        ENV_STR+=" $pair"
+    else
+        ENV_STR+=" -e $pair"
+    fi
+done
+
+# ── Search for offers ────────────────────────────────────────────────────────
+echo "Searching: $QUERY  (max \$$MAX_PRICE/hr) ..."
+OFFERS=$(vastai search offers "$QUERY dph<=$MAX_PRICE rentable=true" -o 'dph' --raw 2>/dev/null) || {
+    echo "Error: vastai search failed. Is the CLI configured?" >&2
+    exit 1
+}
+
+OFFER_ID=$(echo "$OFFERS" | python3 -c "
+import json, sys
+offers = json.load(sys.stdin)
+if not offers:
+    sys.exit(1)
+print(offers[0]['id'])
+" 2>/dev/null) || {
+    echo "No offers found matching query. Try relaxing --query or --max-price." >&2
+    exit 1
+}
+
+OFFER_PRICE=$(echo "$OFFERS" | python3 -c "
+import json, sys
+offers = json.load(sys.stdin)
+o = offers[0]
+print(f\"{o.get('gpu_name','?')} x{o.get('num_gpus',1)} — \${o.get('dph_total', o.get('dph', '?')):.3f}/hr\")
+" 2>/dev/null)
+
+echo "Best offer: #$OFFER_ID  ($OFFER_PRICE)"
+
+# ── Build create command ─────────────────────────────────────────────────────
+CMD=(vastai create instance "$OFFER_ID"
+     --image "$IMAGE"
+     --disk "$DISK"
+)
+$JUPYTER                 && CMD+=(--jupyter)
+$SSH                     && CMD+=(--ssh)
+$JUPYTER_LAB             && CMD+=(--jupyter-lab)
+[[ -n "$DIRECT" ]]       && CMD+=($DIRECT)
+[[ -n "$ENV_STR" ]]      && CMD+=(--env "$ENV_STR")
+[[ -n "$LABEL" ]]        && CMD+=(--label "$LABEL")
+[[ -n "$ONSTART_CMD" ]]  && CMD+=(--onstart-cmd "$ONSTART_CMD")
+
+if $DRY_RUN; then
+    echo ""
+    echo "[dry-run] Would execute:"
+    echo "  ${CMD[*]}"
+    if [[ ${#SYNC_MOUNTS[@]} -gt 0 ]]; then
+        echo ""
+        echo "[dry-run] Cloud sync mounts:"
+        for mount in "${SYNC_MOUNTS[@]}"; do
+            IFS=':' read -r conn src dst mode <<< "$mount"
+            case "$mode" in
+                down) arrow="→" ;;
+                up)   arrow="←" ;;
+                *)    arrow="↔" ;;
+            esac
+            echo "  $conn:$src $arrow $dst  ($mode)"
+        done
+    fi
+    exit 0
+fi
+
+# ── Create instance ──────────────────────────────────────────────────────────
+echo "Creating instance..."
+CREATE_OUTPUT=$("${CMD[@]}" 2>&1) || {
+    echo "Error creating instance: $CREATE_OUTPUT" >&2
+    exit 1
+}
+
+echo "$CREATE_OUTPUT"
+
+INSTANCE_ID=$(echo "$CREATE_OUTPUT" | sed -n "s/.*'new_contract': \([0-9]*\).*/\1/p" | head -1)
+[[ -z "$INSTANCE_ID" ]] && INSTANCE_ID=$(echo "$CREATE_OUTPUT" | grep -oE '[0-9]+' | head -1)
+
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "  Instance created: #$INSTANCE_ID"
+echo "  Monitor:  vastai show instance $INSTANCE_ID"
+echo "  Logs:     vastai logs $INSTANCE_ID"
+echo "  SSH:      vastai ssh-url $INSTANCE_ID"
+echo "  Destroy:  vastai destroy instance $INSTANCE_ID"
+if [[ ${#SYNC_MOUNTS[@]} -gt 0 ]]; then
+    echo ""
+    echo "  Cloud sync mounts:"
+    for mount in "${SYNC_MOUNTS[@]}"; do
+        IFS=':' read -r conn src dst mode <<< "$mount"
+        case "$mode" in
+            down) arrow="→" ;;
+            up)   arrow="←" ;;
+            *)    arrow="↔" ;;
+        esac
+        echo "    $conn:$src $arrow $dst  ($mode)"
+    done
+fi
+echo "════════════════════════════════════════════════════════════"

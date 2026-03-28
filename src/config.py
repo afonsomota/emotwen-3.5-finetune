@@ -105,6 +105,15 @@ class DataConfig:
     max_go_emotions_synthetic: int = 5000
     max_counsel_chat: int = 2000
 
+    # Fraction of synthetic single-turn examples to extend to multi-turn
+    # (used only when synthetic_hub_id is None — i.e. inline generation fallback)
+    multi_turn_extension_fraction: float = 0.50
+
+    # Pre-generated synthetic dataset on HF Hub (from generate_multi_turn.py).
+    # When set, data_prep loads this instead of generating synthetic data inline.
+    # Set to None to fall back to inline generation.
+    synthetic_hub_id: str | None = "brianist/emotwen-3.5-synthetic"
+
     train_split: float = 0.90
     eval_holdout_size: int = 200
     random_seed: int = 42
@@ -195,6 +204,20 @@ class EvalConfig:
     results_save_path: str = str(OUTPUTS_DIR / "eval_results.json")
     report_to: str = "wandb"
 
+# ─── Multi-turn evaluation config ─────────────────────────────────────────────
+
+@dataclass
+class MultiTurnEvalConfig:
+    n_turns: int = 5                    # Max assistant turns to generate per conversation
+    n_conversations: int = 50           # Number of conversations to simulate
+    self_bleu_threshold: float = 0.6    # Flag conversation as repetitive if any pair exceeds this
+    lcs_token_threshold: int = 10       # Flag if longest common substring ≥ this many tokens
+    relevance_threshold: float = 0.3    # Flag response as off-topic if cosine sim below this
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    max_new_tokens: int = 200
+    temperature: float = 0.7
+    top_p: float = 0.9
+
 # ─── GRPO training config ─────────────────────────────────────────────────────
 
 @dataclass
@@ -235,6 +258,117 @@ class GRPOTrainConfig:
     # Number of prompts to use for GRPO training
     n_grpo_prompts: int = 400
 
+# ─── Multi-turn generation config ────────────────────────────────────────────
+
+@dataclass
+class GenerateMultiTurnConfig:
+    """Config for the standalone multi-turn conversation generator."""
+    # HF Hub dataset to push generated conversations to
+    hub_repo_id: str = "brianist/emotwen-3.5-synthetic"
+
+    # Source datasets to draw seed examples from
+    go_emotions_id: str = "google-research-datasets/go_emotions"
+    go_emotions_config: str = "simplified"
+    dair_emotion_id: str = "dair-ai/emotion"
+    counsel_chat_id: str = "nbertagnolli/counsel-chat"
+
+    # How many seed examples to use from each source
+    max_go_emotions: int = 5000
+    max_dair_emotion: int = 2000
+    max_counsel_chat: int = 2000
+
+    # Fraction of single-turn examples to extend to multi-turn via templates
+    template_extension_fraction: float = 0.50
+
+    # RAG injection (applied to single-turn examples before extension)
+    rag_injection_fraction: float = 0.30
+
+    # Whether to push to HF Hub (set False to only save locally)
+    push_to_hub: bool = True
+    # Local save path (always saved here regardless of push_to_hub)
+    local_save_dir: str = str(DATA_DIR / "synthetic_multi_turn")
+
+    random_seed: int = 42
+
+
+# ─── Self-chat generation config ─────────────────────────────────────────────
+
+@dataclass
+class SelfChatConfig:
+    """Config for generating multi-turn conversations via model self-chat.
+
+    Uses a local Qwen 3.5 4B model to play both user and assistant roles,
+    producing 3-5 turn empathetic journal conversations at scale.
+    GPU required.
+    """
+    # Model to use for self-chat generation
+    model_id: str = "unsloth/Qwen3.5-4B"
+    # BF16 (no quantization) is best for RTX 4090 — 4B model fits in 24GB
+    # easily (~8GB), and full precision gives best generation quality.
+    # Set to True for 4-bit if running on a smaller GPU (e.g. T4 16GB).
+    load_in_4bit: bool = False
+    dtype: str = "bfloat16"  # "bfloat16", "float16", or "auto"
+
+    # Number of conversations to generate
+    n_conversations: int = 3000
+
+    # Turn range per conversation (inclusive)
+    min_turns: int = 3
+    max_turns: int = 5
+
+    # Generation parameters
+    max_new_tokens: int = 150
+    temperature: float = 0.8
+    top_p: float = 0.9
+
+    # Batch size for generation (adjust for GPU memory)
+    batch_size: int = 8
+
+    # Fraction of conversations to use RAG-injected system prompt
+    rag_injection_fraction: float = 0.30
+
+    random_seed: int = 42
+
+
+# ─── Conversation augmentation config ────────────────────────────────────────
+
+@dataclass
+class ConversationAugmentConfig:
+    """Config for augmenting existing real conversations with additional turns.
+
+    Extends empathetic_dialogues conversations by generating 1-2 more
+    user-assistant turns using an LLM (local model or API).
+    """
+    # Source dataset to augment
+    source_dataset_id: str = "Estwld/empathetic_dialogues_llm"
+
+    # Number of conversations to augment (sampled from source)
+    n_conversations: int = 2000
+
+    # Extra turns to add per conversation
+    min_extra_turns: int = 1
+    max_extra_turns: int = 2
+
+    # Model backend: "local" for local GPU, "openai", or "anthropic"
+    backend: str = "local"
+
+    # Local model (used when backend="local")
+    local_model_id: str = "unsloth/Qwen3.5-4B"
+    load_in_4bit: bool = False
+    dtype: str = "bfloat16"
+
+    # API model (used when backend="openai" or "anthropic")
+    api_model: str = "gpt-4o-mini"
+
+    # Generation parameters
+    max_new_tokens: int = 150
+    temperature: float = 0.8
+    top_p: float = 0.9
+
+    batch_size: int = 8
+    random_seed: int = 42
+
+
 # ─── W&B config ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -251,6 +385,10 @@ DEFAULT_LORA_CONFIG = LoraConfig()
 DEFAULT_SFT_STAGE1_CONFIG = SFTStage1Config()
 DEFAULT_SFT_STAGE2_CONFIG = SFTStage2Config()
 DEFAULT_EVAL_CONFIG = EvalConfig()
+DEFAULT_MULTI_TURN_EVAL_CONFIG = MultiTurnEvalConfig()
 DEFAULT_GRPO_LORA_CONFIG = GRPOLoraConfig()
 DEFAULT_GRPO_TRAIN_CONFIG = GRPOTrainConfig()
+DEFAULT_GENERATE_MT_CONFIG = GenerateMultiTurnConfig()
+DEFAULT_SELF_CHAT_CONFIG = SelfChatConfig()
+DEFAULT_CONVERSATION_AUGMENT_CONFIG = ConversationAugmentConfig()
 DEFAULT_WANDB_CONFIG = WandbConfig()

@@ -7,12 +7,17 @@ Fine-tunes **Qwen 3.5 (0.8B)** into an empathetic journal companion chatbot (Emo
 ## Architecture
 
 ```
-Raw Datasets (HuggingFace Hub)
-    ↓ src/data_prep.py
+Seed Datasets (HuggingFace Hub)
+    ↓ src/generate_multi_turn.py   (run once, or when regenerating)
+    │  ├─ Template-based multi-turn extension (CPU)
+    │  ├─ Self-chat via Qwen 3.5 4B (GPU) — 3-5 turn conversations
+    │  └─ Conversation augmentation (GPU/API) — extends empathetic_dialogues
+HF Hub: brianist/emotwen-3.5-synthetic
+    ↓ src/data_prep.py             (loads synthetic from Hub + real datasets)
 data/sft_train, sft_val, eval_200
     ↓ src/train_sft.py  (Stage 1: tone, Stage 2: journal domain)
 outputs/sft_stage2/
-    ↓ src/evaluate.py
+    ↓ src/evaluate.py   (includes multi-turn eval)
     → if >15% responses exceed 5 sentences → trigger GRPO
     ↓ src/train_grpo.py  (optional)
 outputs/final_merged/  (16-bit merged, ready for deployment)
@@ -26,30 +31,40 @@ All stages are Colab notebooks. Run them in order:
 
 | Notebook | Stage | GPU needed |
 |---|---|---|
-| `nb/01_data_prep.ipynb` | Data preparation | No (CPU) |
+| `nb/00_generate_multi_turn.ipynb` | Synthetic multi-turn generation → HF Hub | Template: No (CPU); Self-chat/augment: Yes (RTX 4090) |
+| `nb/01_data_prep.ipynb` | Data preparation (loads synthetic from Hub) | No (CPU) |
 | `nb/02_sft_train.ipynb` | SFT Stage 1 + 2 | Yes (T4+) |
-| `nb/03_eval.ipynb` | Evaluation + GRPO decision | Yes |
+| `nb/03_eval.ipynb` | Evaluation + multi-turn eval + GRPO decision | Yes |
 | `nb/04_grpo.ipynb` | GRPO (if triggered) | Yes |
+
+> **Note:** Step 00 only needs to be re-run when you change templates, seed counts, or generation strategy. The published HF dataset is reused across data prep runs.
+>
+> **GPU note:** Self-chat and conversation augmentation use Qwen 3.5 4B in BF16 (~8GB VRAM). RTX 4090 (24GB) is the target GPU — no quantization needed for best generation quality. Set `sc_load_in_4bit=True` for smaller GPUs.
 
 ## Source Layout
 
 ```
 src/
-  config.py       # All hyperparams, system prompts, dataset IDs — edit here first
-  data_prep.py    # Dataset loading, filtering, synthesis
-  train_sft.py    # Two-stage supervised fine-tuning
-  train_grpo.py   # GRPO reinforcement learning
-  evaluate.py     # Multi-metric evaluation + LLM judge
-  utils.py        # Shared: sentence counter, advice detector, GRPO rewards
+  config.py              # All hyperparams, system prompts, dataset IDs — edit here first
+  generate_multi_turn.py # Synthetic multi-turn: templates + self-chat + augmentation → HF Hub
+  data_prep.py           # Dataset loading, filtering, mixing (loads synthetic from Hub)
+  train_sft.py           # Two-stage supervised fine-tuning
+  train_grpo.py          # GRPO reinforcement learning
+  evaluate.py            # Multi-metric evaluation + multi-turn eval + LLM judge
+  utils.py               # Shared: sentence counter, advice detector, GRPO rewards, self-BLEU
 ```
 
 ## Configuration
 
 Everything is in `src/config.py`. Key dataclasses:
 
-- `DataConfig` — dataset IDs, max samples per source, RAG fraction
+- `GenerateMultiTurnConfig` — HF Hub repo, seed dataset sizes, extension fraction
+- `SelfChatConfig` — model, n_conversations, turn range, dtype (BF16 default for RTX 4090)
+- `ConversationAugmentConfig` — source dataset, backend (local/openai/anthropic), n_conversations
+- `DataConfig` — dataset IDs, max samples per source, RAG fraction, `synthetic_hub_id`
 - `SFTStage1Config` / `SFTStage2Config` — LR, steps, batch size per stage
 - `EvalConfig` — temperature, LLM judge model
+- `MultiTurnEvalConfig` — turns, conversations, self-BLEU/relevance thresholds
 - `GRPOTrainConfig` — KL penalty (beta), generation count, reward weights
 - `WandbConfig` — project/run name, entity
 
@@ -124,6 +139,58 @@ from src.utils import has_advice
 has_advice("You should try meditation.")  # True
 has_advice("That sounds really hard.")    # False
 ```
+
+## Launching on Vast.ai
+
+Use `scripts/emotwen-launch.sh` to launch training runs on Vast.ai. It wraps the generic `vastai-launch.sh` with EmotWen defaults (provisioning script, repo clone, API key forwarding).
+
+**Prerequisites:** Set API keys in the environment or a `.env` file in the project root:
+```bash
+export WANDB_API_KEY=xxx          # required
+export HF_TOKEN=xxx               # optional (private datasets)
+export VAST_API_KEY=xxx            # needed for --cloud-sync (warns if missing)
+```
+
+**Headless training (default):**
+```bash
+./scripts/emotwen-launch.sh --stage full_train
+```
+
+**Interactive Jupyter+SSH session:**
+```bash
+./scripts/emotwen-launch.sh --interactive --gpu 'gpu_name=A100_SXM4 num_gpus=1' --max-price 3.0
+```
+
+**With cloud sync and config overrides:**
+```bash
+./scripts/emotwen-launch.sh --stage full_train \
+  --cloud-sync 52:/emotwen \
+  --overrides "max_empathetic=5000 stage1_max_steps=500"
+```
+
+**Available stages:** `generate`, `data_prep`, `sft`, `eval`, `grpo`, `full_train`, `full_train_with_gen`
+
+**Key flags:**
+| Flag | Purpose |
+|---|---|
+| `--stage STAGE` | Pipeline stage to run (default: `full_train`) |
+| `--branch BRANCH` | Git branch to clone on the instance (default: `main`) |
+| `--cloud-sync CONN:PATH` | Persist outputs/data via Vast.ai cloud storage |
+| `--overrides "K=V ..."` | Config overrides passed to the pipeline |
+| `--gpu QUERY` | Vast.ai GPU search query |
+| `--max-price PRICE` | Max $/hr bid |
+| `--dry-run` | Print the launch command without executing |
+
+Run `./scripts/emotwen-launch.sh --help` for the full option list.
+
+## Blog Notes
+
+Two files track the project story for future blog posts:
+
+- **FINETUNE_BLOG_NOTES.md** — fine-tuning journey (data, training, bugs, experiments)
+- **VASTAI_BLOG_NOTES.md** — Vast.ai infrastructure setup
+
+When a user request results in a meaningful change (new feature, bug fix, architecture decision, or lesson learned), append a concise entry to the relevant blog notes file. Skip trivial renames or formatting-only changes.
 
 ## Dependencies
 
