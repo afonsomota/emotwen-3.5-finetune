@@ -42,11 +42,13 @@ from src.config import (
     WandbConfig,
 )
 from src.utils import (
+    apply_overrides,
     count_sentences,
     has_advice,
     pairwise_self_bleu,
     exact_repeat_check,
     longest_common_substring_tokens,
+    wandb_run_name,
 )
 
 
@@ -564,6 +566,137 @@ def eval_multi_turn(
     }
 
 
+# ─── W&B eval logging helper ─────────────────────────────────────────────────
+
+def _log_wandb_eval(
+    results: dict,
+    dist: "Counter",
+    responses: list[str],
+    user_messages: list[str],
+) -> None:
+    """Log scalar metrics, sentence distribution chart, and per-sample table to W&B."""
+    grpo_needed = results.get("grpo_needed", False)
+    wandb_metrics = {k: v for k, v in results.items()
+                     if not isinstance(v, (dict, bool)) and v == v}  # exclude nan and dict
+    wandb_metrics["grpo_needed"] = int(grpo_needed)
+    wandb.log(wandb_metrics)
+
+    # Log sentence distribution as a W&B bar chart
+    wandb.log({
+        "sentence_distribution": wandb.plot.bar(
+            wandb.Table(
+                data=[[str(k), v] for k, v in sorted(dist.items())],
+                columns=["sentence_count", "frequency"],
+            ),
+            "sentence_count",
+            "frequency",
+            title="Response Sentence Count Distribution",
+        )
+    })
+
+    # Log per-sample results as a W&B table
+    table_data = [
+        [i, user_messages[i][:100], responses[i][:200],
+         count_sentences(responses[i])[0], has_advice(responses[i])]
+        for i in range(len(responses))
+    ]
+    wandb.log({
+        "eval_samples": wandb.Table(
+            data=table_data,
+            columns=["idx", "user_msg", "response", "n_sentences", "has_advice"],
+        )
+    })
+
+
+# ─── Judge backend resolver ──────────────────────────────────────────────────
+
+def _resolve_judge_backend(cfg: "EvalConfig") -> tuple[str, str]:
+    """
+    Return (active_api, active_model) based on environment variables and cfg.
+
+    Priority: Anthropic (if requested) > OpenAI > Anthropic (fallback) > local.
+    """
+    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+    if has_anthropic and cfg.judge_api == "anthropic":
+        return "anthropic", cfg.judge_model
+    elif has_openai:
+        return "openai", cfg.judge_model
+    elif has_anthropic:
+        return "anthropic", cfg.judge_model
+    else:
+        return "local", cfg.judge_local_model
+
+
+# ─── Sentence stats helper ───────────────────────────────────────────────────
+
+def _compute_sentence_stats(responses: list[str]) -> dict:
+    """
+    Run sentence counting on all responses.
+
+    Returns dict with: n_sentences_list, exempt_count, dist,
+    pct_in_range, pct_over_5.
+    """
+    n_sentences_list = []
+    exempt_count = 0
+
+    for resp in responses:
+        n, exempt = count_sentences(resp)
+        if exempt:
+            exempt_count += 1
+        else:
+            n_sentences_list.append(n if n is not None else 0)
+
+    dist = Counter(n_sentences_list)
+    non_exempt = len(n_sentences_list)
+    in_range = sum(1 for n in n_sentences_list if 2 <= n <= 5)
+    over_5 = sum(1 for n in n_sentences_list if n > 5)
+
+    pct_in_range = in_range / non_exempt if non_exempt else 0.0
+    pct_over_5 = over_5 / non_exempt if non_exempt else 0.0
+
+    print("\n── Sentence count distribution (non-exempt) ──")
+    for k in sorted(dist):
+        bar = "█" * dist[k]
+        print(f"  {k:2d} sentences: {dist[k]:4d}  {bar}")
+    print(f"  Exempt ('Let me explain:'): {exempt_count}")
+    print(f"  In range (2–5): {pct_in_range:.1%}")
+    print(f"  Over 5:         {pct_over_5:.1%}")
+
+    return {
+        "n_sentences_list": n_sentences_list,
+        "exempt_count": exempt_count,
+        "dist": dist,
+        "pct_in_range": pct_in_range,
+        "pct_over_5": pct_over_5,
+    }
+
+
+# ─── Eval prompt preparation ─────────────────────────────────────────────────
+
+def _prepare_eval_prompts(eval_ds, tokenizer) -> tuple[list[str], list[str]]:
+    """
+    For each eval example, build the prompt text (all messages except the
+    final assistant turn) and extract the last user message.
+
+    Returns (prompt_texts, last_user_messages).
+    """
+    prompt_texts = []
+    last_user_messages = []
+    for example in eval_ds:
+        msgs = example["messages"]
+        last_user = next(
+            (m["content"] for m in reversed(msgs) if m["role"] == "user"), ""
+        )
+        prompt_msgs = [m for m in msgs if not (m == msgs[-1] and m["role"] == "assistant")]
+        prompt_texts.append(
+            tokenizer.apply_chat_template(prompt_msgs, add_generation_prompt=True, tokenize=False)
+        )
+        last_user_messages.append(last_user)
+    return prompt_texts, last_user_messages
+
+
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
 def run(config_overrides: dict | None = None) -> dict:
@@ -581,18 +714,13 @@ def run(config_overrides: dict | None = None) -> dict:
     cfg: EvalConfig = DEFAULT_EVAL_CONFIG
     wb_cfg: WandbConfig = DEFAULT_WANDB_CONFIG
 
-    if config_overrides:
-        for k, v in config_overrides.items():
-            if hasattr(cfg, k):
-                setattr(cfg, k, v)
-            elif hasattr(wb_cfg, k):
-                setattr(wb_cfg, k, v)
+    apply_overrides(config_overrides, cfg, wb_cfg)
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     wandb.init(
         project=wb_cfg.project,
         entity=wb_cfg.entity or None,
-        name=config_overrides.get("run_name", f"eval_{run_ts}") if config_overrides else f"eval_{run_ts}",
+        name=wandb_run_name("eval", run_ts, config_overrides),
         job_type="evaluation",
         config=asdict(cfg),
         tags=wb_cfg.tags,
@@ -626,18 +754,7 @@ def run(config_overrides: dict | None = None) -> dict:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    all_prompt_texts = []
-    all_last_users = []
-    for example in eval_ds:
-        msgs = example["messages"]
-        last_user = next(
-            (m["content"] for m in reversed(msgs) if m["role"] == "user"), ""
-        )
-        prompt_msgs = [m for m in msgs if not (m == msgs[-1] and m["role"] == "assistant")]
-        all_prompt_texts.append(
-            tokenizer.apply_chat_template(prompt_msgs, add_generation_prompt=True, tokenize=False)
-        )
-        all_last_users.append(last_user)
+    all_prompt_texts, all_last_users = _prepare_eval_prompts(eval_ds, tokenizer)
 
     device = next(model.parameters()).device
     for start in tqdm(range(0, len(all_prompt_texts), cfg.eval_batch_size), desc="Inference"):
@@ -668,31 +785,11 @@ def run(config_overrides: dict | None = None) -> dict:
     print(f"Generated {len(responses)} responses")
 
     # ── Sentence count analysis ───────────────────────────────────────────────
-    n_sentences_list = []
-    exempt_count = 0
-
-    for resp in responses:
-        n, exempt = count_sentences(resp)
-        if exempt:
-            exempt_count += 1
-        else:
-            n_sentences_list.append(n if n is not None else 0)
-
-    dist = Counter(n_sentences_list)
-    non_exempt = len(n_sentences_list)
-    in_range = sum(1 for n in n_sentences_list if 2 <= n <= 5)
-    over_5 = sum(1 for n in n_sentences_list if n > 5)
-
-    pct_in_range = in_range / non_exempt if non_exempt else 0.0
-    pct_over_5 = over_5 / non_exempt if non_exempt else 0.0
-
-    print("\n── Sentence count distribution (non-exempt) ──")
-    for k in sorted(dist):
-        bar = "█" * dist[k]
-        print(f"  {k:2d} sentences: {dist[k]:4d}  {bar}")
-    print(f"  Exempt ('Let me explain:'): {exempt_count}")
-    print(f"  In range (2–5): {pct_in_range:.1%}")
-    print(f"  Over 5:         {pct_over_5:.1%}")
+    sent_stats = _compute_sentence_stats(responses)
+    exempt_count = sent_stats["exempt_count"]
+    dist = sent_stats["dist"]
+    pct_in_range = sent_stats["pct_in_range"]
+    pct_over_5 = sent_stats["pct_over_5"]
 
     # ── Advice rate ───────────────────────────────────────────────────────────
     advice_count = sum(1 for r in responses if has_advice(r))
@@ -740,21 +837,7 @@ def run(config_overrides: dict | None = None) -> dict:
     llm_length_avg = float("nan")
 
     if cfg.judge_model:
-        has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-        has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-        if has_anthropic and cfg.judge_api == "anthropic":
-            active_api = "anthropic"
-            active_model = cfg.judge_model
-        elif has_openai:
-            active_api = "openai"
-            active_model = cfg.judge_model
-        elif has_anthropic:
-            active_api = "anthropic"
-            active_model = cfg.judge_model
-        else:
-            active_api = "local"
-            active_model = cfg.judge_local_model
+        active_api, active_model = _resolve_judge_backend(cfg)
 
         print(f"\n── LLM-as-judge ({active_model}, api={active_api}) — evaluating 50 samples …")
         judge_pairs = [{"user_msg": u, "response": r}
@@ -883,36 +966,7 @@ def run(config_overrides: dict | None = None) -> dict:
     print(f"Results saved → {cfg.results_save_path}")
 
     # ── W&B logging ───────────────────────────────────────────────────────────
-    wandb_metrics = {k: v for k, v in results.items()
-                     if not isinstance(v, (dict, bool)) and v == v}  # exclude nan and dict
-    wandb_metrics["grpo_needed"] = int(grpo_needed)
-    wandb.log(wandb_metrics)
-
-    # Log sentence distribution as a W&B bar chart
-    wandb.log({
-        "sentence_distribution": wandb.plot.bar(
-            wandb.Table(
-                data=[[str(k), v] for k, v in sorted(dist.items())],
-                columns=["sentence_count", "frequency"],
-            ),
-            "sentence_count",
-            "frequency",
-            title="Response Sentence Count Distribution",
-        )
-    })
-
-    # Log per-sample results as a W&B table
-    table_data = [
-        [i, user_messages[i][:100], responses[i][:200],
-         count_sentences(responses[i])[0], has_advice(responses[i])]
-        for i in range(len(responses))
-    ]
-    wandb.log({
-        "eval_samples": wandb.Table(
-            data=table_data,
-            columns=["idx", "user_msg", "response", "n_sentences", "has_advice"],
-        )
-    })
+    _log_wandb_eval(results, dist, responses, user_messages)
 
     wandb.finish()
     return results

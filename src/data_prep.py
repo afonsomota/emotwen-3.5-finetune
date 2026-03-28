@@ -34,7 +34,7 @@ from src.config import (
     DEFAULT_DATA_CONFIG,
     DEFAULT_WANDB_CONFIG,
 )
-from src.utils import has_advice
+from src.utils import apply_overrides, has_advice, wandb_run_name
 
 # ─── Emotion reflection templates ─────────────────────────────────────────────
 # Used to synthesize assistant turns for go_emotions/dair-ai examples.
@@ -589,6 +589,7 @@ def _go_emotions_to_messages(
     rng: random.Random,
     label_feature: ClassLabel | None = None,
     source_tag: str = "go_emotions_synthetic",
+    include_n_turns: bool = False,
 ) -> list[dict]:
     """Create synthetic single-turn journal conversations from go_emotions."""
     if label_feature is None:
@@ -619,11 +620,14 @@ def _go_emotions_to_messages(
             {"role": "user", "content": f"I wrote this in my journal today:\n\n\"{text}\""},
             {"role": "assistant", "content": reflection},
         ]
-        conversations.append({
+        entry: dict = {
             "messages": messages,
             "source": source_tag,
             "emotion_label": label_name,
-        })
+        }
+        if include_n_turns:
+            entry["n_turns"] = 1
+        conversations.append(entry)
 
     return conversations
 
@@ -632,6 +636,7 @@ def _dair_emotion_to_messages(
     dataset,
     system_prompt: str,
     rng: random.Random,
+    include_n_turns: bool = False,
 ) -> list[dict]:
     """Create synthetic conversations from dair-ai/emotion dataset."""
     label_map = {0: "sadness", 1: "joy", 2: "love", 3: "anger", 4: "fear", 5: "surprise"}
@@ -645,11 +650,14 @@ def _dair_emotion_to_messages(
             {"role": "user", "content": f"I wrote this in my journal:\n\n\"{text}\""},
             {"role": "assistant", "content": reflection},
         ]
-        conversations.append({
+        entry: dict = {
             "messages": messages,
             "source": "dair_emotion_synthetic",
             "emotion_label": label_name,
-        })
+        }
+        if include_n_turns:
+            entry["n_turns"] = 1
+        conversations.append(entry)
     return conversations
 
 
@@ -657,6 +665,7 @@ def _counsel_chat_to_messages(
     dataset,
     system_prompt: str,
     rng: random.Random,
+    include_n_turns: bool = False,
 ) -> list[dict]:
     """
     Use only the client/question side of counsel-chat.
@@ -673,7 +682,11 @@ def _counsel_chat_to_messages(
             {"role": "user", "content": question},
             {"role": "assistant", "content": reflection},
         ]
-        conversations.append({"messages": messages, "source": "counsel_chat_synthetic"})
+        entry: dict = {"messages": messages, "source": "counsel_chat_synthetic"}
+        if include_n_turns:
+            entry["emotion_label"] = "neutral"
+            entry["n_turns"] = 1
+        conversations.append(entry)
     return conversations
 
 
@@ -690,163 +703,105 @@ def _let_me_explain_conversations(system_prompt: str) -> list[dict]:
     return conversations
 
 
-# ─── Main pipeline ────────────────────────────────────────────────────────────
+# ─── Synthetic generation helper ─────────────────────────────────────────────
 
-def run(config_overrides: dict | None = None) -> dict:
+def _generate_synthetic_inline(cfg: "DataConfig", rng: random.Random) -> list[dict]:
     """
-    Full data preparation pipeline.
+    Generate synthetic conversations inline when no synthetic_hub_id is configured.
 
-    Returns
-    -------
-    dict with keys:
-      train_size, val_size, eval_size,
-      advice_filtered_ed, advice_filtered_dd,
-      sources_breakdown (dict),
-      grpo_needed (always False at this stage — set by evaluate.py)
+    Returns combined list of go_emotions + dair + counsel + multi_turn conversations.
     """
-    cfg: DataConfig = DEFAULT_DATA_CONFIG
-    wb_cfg: WandbConfig = DEFAULT_WANDB_CONFIG
+    print("\n  No synthetic_hub_id set — generating inline …")
 
-    # Apply overrides
-    if config_overrides:
-        for k, v in config_overrides.items():
-            if hasattr(cfg, k):
-                setattr(cfg, k, v)
-            elif hasattr(wb_cfg, k):
-                setattr(wb_cfg, k, v)
+    print("  go_emotions")
+    ge_ds = load_dataset(cfg.go_emotions_id, cfg.go_emotions_config)
+    ge_train_full = list(ge_ds["train"])
+    label_feature = ge_ds["train"].features["labels"].feature
 
-    wandb.init(
-        project=wb_cfg.project,
-        entity=wb_cfg.entity or None,
-        name=config_overrides.get("run_name", f"data_prep_{datetime.now():%Y%m%d_%H%M%S}") if config_overrides else f"data_prep_{datetime.now():%Y%m%d_%H%M%S}",
-        job_type="data_prep",
-        config=asdict(cfg),
-        tags=wb_cfg.tags,
+    rag_pool: dict[str, list[str]] = {}
+    for row in ge_train_full:
+        for lid in row["labels"]:
+            lname = label_feature.int2str(lid)
+            rag_pool.setdefault(lname, []).append(row["text"])
+
+    rng.shuffle(ge_train_full)
+    ge_train = ge_train_full[: cfg.max_go_emotions_synthetic] if cfg.max_go_emotions_synthetic else ge_train_full
+    ge_convs = _go_emotions_to_messages(
+        ge_train, SYSTEM_PROMPT_BASE, SYSTEM_PROMPT_RAG,
+        cfg.rag_injection_fraction, rag_pool, rng,
+        label_feature=label_feature,
+    )
+    print(f"    go_emotions synthetic: {len(ge_convs)} conversations")
+
+    print("  dair-ai/emotion")
+    em_train = _load_and_sample(cfg.dair_emotion_id, None, "train", 2000, rng)
+    em_convs = _dair_emotion_to_messages(em_train, SYSTEM_PROMPT_BASE, rng)
+    print(f"    dair emotion synthetic: {len(em_convs)} conversations")
+
+    print("  counsel-chat")
+    cc_train = _load_and_sample(cfg.counsel_chat_id, None, "train", cfg.max_counsel_chat, rng)
+    cc_convs = _counsel_chat_to_messages(cc_train, SYSTEM_PROMPT_BASE, rng)
+    print(f"    counsel-chat synthetic: {len(cc_convs)} conversations")
+
+    # Extend single-turn → multi-turn
+    mt_fraction = cfg.multi_turn_extension_fraction
+    mt_sources = ge_convs + em_convs
+    rng.shuffle(mt_sources)
+    n_to_extend = int(len(mt_sources) * mt_fraction)
+    multi_turn_convs = []
+    for conv in mt_sources[:n_to_extend]:
+        label = conv.get("emotion_label", "neutral")
+        extended = _extend_to_multi_turn(conv, label, rng)
+        if extended is not None:
+            multi_turn_convs.append(extended)
+    print(
+        f"\n    Multi-turn extensions: {len(multi_turn_convs)} "
+        f"(from {n_to_extend} candidates, {mt_fraction:.0%} of synthetic)"
     )
 
-    rng = random.Random(cfg.random_seed)
-    Path(cfg.train_save_dir).parent.mkdir(parents=True, exist_ok=True)
+    return ge_convs + em_convs + cc_convs + multi_turn_convs
 
-    print("Loading datasets …")
 
-    # ── empathetic_dialogues ──────────────────────────────────────────────────
-    print(f"  {cfg.empathetic_dialogues_id}")
-    ed_ds = load_dataset(cfg.empathetic_dialogues_id)
-    ed_train = list(ed_ds["train"])
-    rng.shuffle(ed_train)
-    if cfg.max_empathetic:
-        ed_train = ed_train[: cfg.max_empathetic]
-    ed_convs_raw = _ed_split_to_messages(ed_train, SYSTEM_PROMPT_BASE)
-    advice_filtered_ed = len(ed_train) // 10 - len(ed_convs_raw)  # rough proxy
-    print(f"    empathetic_dialogues: {len(ed_convs_raw)} conversations kept")
+# ─── Dataset loading helper ───────────────────────────────────────────────────
 
-    # ── daily_dialog ──────────────────────────────────────────────────────────
-    print("  daily_dialog")
-    dd_ds = load_dataset(cfg.daily_dialog_id)
-    dd_train = list(dd_ds["train"])
-    rng.shuffle(dd_train)
-    if cfg.max_daily_dialog:
-        dd_train = dd_train[: cfg.max_daily_dialog]
-    dd_convs_raw = _daily_dialog_to_messages(dd_train, SYSTEM_PROMPT_BASE)
-    advice_filtered_dd = len(dd_train) - len(dd_convs_raw)
-    print(f"    daily_dialog: {len(dd_convs_raw)} conversations kept")
+def _load_and_sample(
+    dataset_id: str,
+    config_name: str | None,
+    split: str,
+    max_samples: int | None,
+    rng: random.Random,
+) -> list[dict]:
+    """Load a HF dataset split, shuffle, and cap to max_samples."""
+    ds = load_dataset(dataset_id, config_name) if config_name else load_dataset(dataset_id)
+    rows = list(ds[split])
+    rng.shuffle(rows)
+    if max_samples:
+        rows = rows[:max_samples]
+    return rows
 
-    # ── Synthetic data: load from HF Hub or generate inline ─────────────────
-    lme_convs = _let_me_explain_conversations(SYSTEM_PROMPT_BASE)
-    print(f"    'Let me explain:' exemplars: {len(lme_convs)}")
 
-    if cfg.synthetic_hub_id:
-        # ── Load pre-generated synthetic conversations from HF Hub ────────
-        print(f"\n  Loading pre-generated synthetic data from: {cfg.synthetic_hub_id}")
-        syn_ds = load_dataset(cfg.synthetic_hub_id)
-        syn_train = list(syn_ds["train"])
-        synthetic_convs = [
-            {"messages": row["messages"], "source": row["source"]}
-            for row in syn_train
-        ]
-        print(f"    Loaded {len(synthetic_convs)} synthetic conversations from Hub")
-    else:
-        # ── Inline generation fallback (original path) ────────────────────
-        print("\n  No synthetic_hub_id set — generating inline …")
+# ─── Split and save helper ───────────────────────────────────────────────────
 
-        print("  go_emotions")
-        ge_ds = load_dataset(cfg.go_emotions_id, cfg.go_emotions_config)
-        ge_train = list(ge_ds["train"])
-        label_feature = ge_ds["train"].features["labels"].feature
+def _split_and_save(
+    all_convs: list[dict],
+    cfg: "DataConfig",
+    rng: random.Random,
+) -> tuple["Dataset", "Dataset", "Dataset"]:
+    """
+    Shuffle, split into eval/train/val, save all three to disk.
 
-        rag_pool: dict[str, list[str]] = {}
-        for row in ge_train:
-            for lid in row["labels"]:
-                lname = label_feature.int2str(lid)
-                rag_pool.setdefault(lname, []).append(row["text"])
-
-        rng.shuffle(ge_train)
-        if cfg.max_go_emotions_synthetic:
-            ge_train = ge_train[: cfg.max_go_emotions_synthetic]
-        ge_convs = _go_emotions_to_messages(
-            ge_train, SYSTEM_PROMPT_BASE, SYSTEM_PROMPT_RAG,
-            cfg.rag_injection_fraction, rag_pool, rng,
-            label_feature=label_feature,
-        )
-        print(f"    go_emotions synthetic: {len(ge_convs)} conversations")
-
-        print("  dair-ai/emotion")
-        em_ds = load_dataset(cfg.dair_emotion_id)
-        em_train = list(em_ds["train"])
-        rng.shuffle(em_train)
-        em_convs = _dair_emotion_to_messages(em_train[:2000], SYSTEM_PROMPT_BASE, rng)
-        print(f"    dair emotion synthetic: {len(em_convs)} conversations")
-
-        print("  counsel-chat")
-        cc_ds = load_dataset(cfg.counsel_chat_id)
-        cc_train = list(cc_ds["train"])
-        rng.shuffle(cc_train)
-        if cfg.max_counsel_chat:
-            cc_train = cc_train[: cfg.max_counsel_chat]
-        cc_convs = _counsel_chat_to_messages(cc_train, SYSTEM_PROMPT_BASE, rng)
-        print(f"    counsel-chat synthetic: {len(cc_convs)} conversations")
-
-        # Extend single-turn → multi-turn
-        mt_fraction = cfg.multi_turn_extension_fraction
-        mt_sources = ge_convs + em_convs
-        rng.shuffle(mt_sources)
-        n_to_extend = int(len(mt_sources) * mt_fraction)
-        multi_turn_convs = []
-        for conv in mt_sources[:n_to_extend]:
-            label = conv.get("emotion_label", "neutral")
-            extended = _extend_to_multi_turn(conv, label, rng)
-            if extended is not None:
-                multi_turn_convs.append(extended)
-        print(f"\n    Multi-turn extensions: {len(multi_turn_convs)} "
-              f"(from {n_to_extend} candidates, {mt_fraction:.0%} of synthetic)")
-
-        synthetic_convs = ge_convs + em_convs + cc_convs + multi_turn_convs
-
-    # ── Combine all ───────────────────────────────────────────────────────────
-    all_convs = ed_convs_raw + dd_convs_raw + lme_convs + synthetic_convs
-    rng.shuffle(all_convs)
-
-    sources = {}
-    for c in all_convs:
-        s = c.get("source", "unknown")
-        sources[s] = sources.get(s, 0) + 1
-    print(f"\nTotal conversations: {len(all_convs)}")
-    for s, n in sorted(sources.items()):
-        print(f"  {s}: {n}")
-
-    # ── Split: eval_200 first (held-out, never trained on) ────────────────────
+    Returns (train_ds, val_ds, eval_ds).
+    """
     rng.shuffle(all_convs)
     eval_convs = all_convs[: cfg.eval_holdout_size]
     remaining = all_convs[cfg.eval_holdout_size :]
 
-    # ── Train / val split ─────────────────────────────────────────────────────
     n_train = int(len(remaining) * cfg.train_split)
     train_convs = remaining[:n_train]
     val_convs = remaining[n_train:]
 
     print(f"\nSplit → train: {len(train_convs)}, val: {len(val_convs)}, eval: {len(eval_convs)}")
 
-    # ── Save as HuggingFace Datasets ──────────────────────────────────────────
     def to_hf_dataset(convs: list[dict]) -> Dataset:
         return Dataset.from_list([{"messages": c["messages"], "source": c.get("source", "")} for c in convs])
 
@@ -867,11 +822,95 @@ def run(config_overrides: dict | None = None) -> dict:
     print(f"  val   → {cfg.val_save_dir}")
     print(f"  eval  → {cfg.eval_save_dir}")
 
+    return train_ds, val_ds, eval_ds
+
+
+# ─── Main pipeline ────────────────────────────────────────────────────────────
+
+def run(config_overrides: dict | None = None) -> dict:
+    """
+    Full data preparation pipeline.
+
+    Returns
+    -------
+    dict with keys:
+      train_size, val_size, eval_size,
+      advice_filtered_ed, advice_filtered_dd,
+      sources_breakdown (dict),
+      grpo_needed (always False at this stage — set by evaluate.py)
+    """
+    cfg: DataConfig = DEFAULT_DATA_CONFIG
+    wb_cfg: WandbConfig = DEFAULT_WANDB_CONFIG
+
+    # Apply overrides
+    apply_overrides(config_overrides, cfg, wb_cfg)
+
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    wandb.init(
+        project=wb_cfg.project,
+        entity=wb_cfg.entity or None,
+        name=wandb_run_name("data_prep", run_ts, config_overrides),
+        job_type="data_prep",
+        config=asdict(cfg),
+        tags=wb_cfg.tags,
+    )
+
+    rng = random.Random(cfg.random_seed)
+    Path(cfg.train_save_dir).parent.mkdir(parents=True, exist_ok=True)
+
+    print("Loading datasets …")
+
+    # ── empathetic_dialogues ──────────────────────────────────────────────────
+    print(f"  {cfg.empathetic_dialogues_id}")
+    ed_train = _load_and_sample(cfg.empathetic_dialogues_id, None, "train", cfg.max_empathetic, rng)
+    ed_convs_raw = _ed_split_to_messages(ed_train, SYSTEM_PROMPT_BASE)
+    advice_filtered_ed = len(ed_train) // 10 - len(ed_convs_raw)  # rough proxy
+    print(f"    empathetic_dialogues: {len(ed_convs_raw)} conversations kept")
+
+    # ── daily_dialog ──────────────────────────────────────────────────────────
+    print("  daily_dialog")
+    dd_train = _load_and_sample(cfg.daily_dialog_id, None, "train", cfg.max_daily_dialog, rng)
+    dd_convs_raw = _daily_dialog_to_messages(dd_train, SYSTEM_PROMPT_BASE)
+    advice_filtered_dd = len(dd_train) - len(dd_convs_raw)
+    print(f"    daily_dialog: {len(dd_convs_raw)} conversations kept")
+
+    # ── Synthetic data: load from HF Hub or generate inline ─────────────────
+    lme_convs = _let_me_explain_conversations(SYSTEM_PROMPT_BASE)
+    print(f"    'Let me explain:' exemplars: {len(lme_convs)}")
+
+    if cfg.synthetic_hub_id:
+        # ── Load pre-generated synthetic conversations from HF Hub ────────
+        print(f"\n  Loading pre-generated synthetic data from: {cfg.synthetic_hub_id}")
+        syn_ds = load_dataset(cfg.synthetic_hub_id)
+        syn_train = list(syn_ds["train"])
+        synthetic_convs = [
+            {"messages": row["messages"], "source": row["source"]}
+            for row in syn_train
+        ]
+        print(f"    Loaded {len(synthetic_convs)} synthetic conversations from Hub")
+    else:
+        synthetic_convs = _generate_synthetic_inline(cfg, rng)
+
+    # ── Combine all ───────────────────────────────────────────────────────────
+    all_convs = ed_convs_raw + dd_convs_raw + lme_convs + synthetic_convs
+    rng.shuffle(all_convs)
+
+    sources = {}
+    for c in all_convs:
+        s = c.get("source", "unknown")
+        sources[s] = sources.get(s, 0) + 1
+    print(f"\nTotal conversations: {len(all_convs)}")
+    for s, n in sorted(sources.items()):
+        print(f"  {s}: {n}")
+
+    # ── Split, convert, and save datasets ────────────────────────────────────
+    train_ds, val_ds, eval_ds = _split_and_save(all_convs, cfg, rng)
+
     # ── W&B logging ───────────────────────────────────────────────────────────
     stats = {
-        "train_size": len(train_convs),
-        "val_size": len(val_convs),
-        "eval_size": len(eval_convs),
+        "train_size": len(train_ds),
+        "val_size": len(val_ds),
+        "eval_size": len(eval_ds),
         "advice_filtered_empathetic_dialogues": advice_filtered_ed,
         "advice_filtered_daily_dialog": advice_filtered_dd,
         **{f"source_{k}": v for k, v in sources.items()},
@@ -885,9 +924,9 @@ def run(config_overrides: dict | None = None) -> dict:
     wandb.finish()
 
     return {
-        "train_size": len(train_convs),
-        "val_size": len(val_convs),
-        "eval_size": len(eval_convs),
+        "train_size": len(train_ds),
+        "val_size": len(val_ds),
+        "eval_size": len(eval_ds),
         "advice_filtered_ed": advice_filtered_ed,
         "advice_filtered_dd": advice_filtered_dd,
         "sources_breakdown": sources,

@@ -36,7 +36,7 @@ from src.config import (
     WandbConfig,
     SFT_TRAIN_DIR,
 )
-from src.utils import length_reward, advice_penalty_reward
+from src.utils import apply_overrides, length_reward, advice_penalty_reward, wandb_run_name
 
 
 # ─── Model loading ─────────────────────────────────────────────────────────────
@@ -145,11 +145,7 @@ def run(config_overrides: dict | None = None) -> dict:
     skip_if_not_needed = False
     if config_overrides:
         skip_if_not_needed = config_overrides.pop("skip_if_not_needed", False)
-        for k, v in config_overrides.items():
-            for cfg in (lora_cfg, grpo_cfg, wb_cfg):
-                if hasattr(cfg, k):
-                    setattr(cfg, k, v)
-                    break
+    apply_overrides(config_overrides, lora_cfg, grpo_cfg, wb_cfg)
 
     # ── Optional: check eval results to see if GRPO is needed ─────────────────
     from src.config import OUTPUTS_DIR
@@ -171,7 +167,7 @@ def run(config_overrides: dict | None = None) -> dict:
     wandb.init(
         project=wb_cfg.project,
         entity=wb_cfg.entity or None,
-        name=config_overrides.get("run_name", f"grpo_{run_ts}") if config_overrides else f"grpo_{run_ts}",
+        name=wandb_run_name("grpo", run_ts, config_overrides),
         job_type="grpo",
         config={**asdict(lora_cfg), **asdict(grpo_cfg)},
         tags=wb_cfg.tags,

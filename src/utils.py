@@ -25,6 +25,33 @@ _ADVICE_RE = re.compile(ADVICE_REGEX_PATTERN, re.VERBOSE | re.IGNORECASE)
 # Minimum word count for a fragment to count as a sentence
 _MIN_SENTENCE_WORDS = 3
 
+# ─── Config override helper ──────────────────────────────────────────────────
+
+def apply_overrides(overrides: dict | None, *targets) -> None:
+    """Apply key/value overrides to the first target dataclass that has the key."""
+    if not overrides:
+        return
+    for k, v in overrides.items():
+        for target in targets:
+            if hasattr(target, k):
+                setattr(target, k, v)
+                break
+
+
+# ─── W&B run name helper ─────────────────────────────────────────────────────
+
+def wandb_run_name(
+    prefix: str,
+    run_ts: str,
+    overrides: dict | None = None,
+    key: str = "run_name",
+) -> str:
+    """Return a W&B run name from overrides or construct one from prefix + timestamp."""
+    if overrides and key in overrides:
+        return overrides[key]
+    return f"{prefix}_{run_ts}"
+
+
 # ─── Sentence counting ────────────────────────────────────────────────────────
 
 def count_sentences(text: str) -> tuple[int | None, bool]:
