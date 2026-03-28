@@ -114,10 +114,7 @@ def _judge_anthropic(user_msg: str, response: str, model: str = "claude-haiku-4-
         return None
 
 
-def _judge_local(user_msg: str, response: str, model_name: str = "unsloth/Qwen3.5-4B") -> dict | None:
-    """Run the judge using a local Qwen model (fallback when no API keys are set)."""
-    results = _judge_local_batch([{"user_msg": user_msg, "response": response}], model_name, batch_size=1)
-    return results[0]
+_judge_model_cache: dict = {}
 
 
 def _judge_local_batch(
@@ -129,7 +126,7 @@ def _judge_local_batch(
     try:
         from transformers import AutoTokenizer, AutoModelForCausalLM
 
-        cache = _judge_local.__dict__
+        cache = _judge_model_cache
         if cache.get("_model_name") != model_name:
             print(f"[judge] Loading local model: {model_name}")
             tok = AutoTokenizer.from_pretrained(model_name)

@@ -344,20 +344,6 @@ def _generate_batch(
     return results
 
 
-def _generate_response(
-    model,
-    tokenizer,
-    messages: list[dict],
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-) -> str:
-    """Generate a single response given a message history."""
-    return _generate_batch(
-        model, tokenizer, [messages], max_new_tokens, temperature, top_p,
-    )[0]
-
-
 def generate_self_chat(
     cfg: SelfChatConfig,
     rag_pool: dict[str, list[str]] | None = None,

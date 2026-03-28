@@ -254,26 +254,3 @@ def _extract_text(completion: Any) -> str:
             return first.get("content", "").strip()
         return str(first).strip()
     return str(completion).strip()
-
-# ─── Chat template helpers ────────────────────────────────────────────────────
-
-def apply_chat_template(
-    tokenizer,
-    messages: list[dict],
-    add_generation_prompt: bool = True,
-    tokenize: bool = False,
-) -> str:
-    """
-    Thin wrapper around tokenizer.apply_chat_template.
-    Always returns a string (tokenize=False by default).
-    """
-    return tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=add_generation_prompt,
-        tokenize=tokenize,
-    )
-
-
-def messages_to_text(tokenizer, messages: list[dict]) -> str:
-    """Convert messages list to the full formatted string (no generation prompt)."""
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
