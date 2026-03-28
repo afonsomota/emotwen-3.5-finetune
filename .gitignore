@@ -208,3 +208,8 @@ __marimo__/
 
 # MacOS
 .DS_Store
+
+# Review UI
+review-ui/backend/feedback.db
+review-ui/frontend/node_modules/
+review-ui/frontend/dist/
