@@ -30,18 +30,11 @@ from datasets import Dataset, DatasetDict, load_dataset
 from src.config import (
     SYSTEM_PROMPT_BASE,
     SYSTEM_PROMPT_RAG,
-    GenerateMultiTurnConfig,
     SelfChatConfig,
     ConversationAugmentConfig,
     DEFAULT_GENERATE_MT_CONFIG,
-    DEFAULT_SELF_CHAT_CONFIG,
-    DEFAULT_CONVERSATION_AUGMENT_CONFIG,
 )
 from src.data_prep import (
-    _REFLECTION_TEMPLATES,
-    _DEFAULT_TEMPLATE,
-    _CONTINUATION_TEMPLATES,
-    _CONTINUATION_LABEL_MAP,
     _get_reflection,
     _extend_to_multi_turn,
 )
@@ -390,7 +383,7 @@ def generate_self_chat(
     if rng is None:
         rng = random.Random(cfg.random_seed)
 
-    print(f"\n── Self-chat generation ──────────────────────────────────────────")
+    print("\n── Self-chat generation ──────────────────────────────────────────")
     print(f"  Model: {cfg.model_id}")
     print(f"  Target conversations: {cfg.n_conversations}")
     print(f"  Turn range: {cfg.min_turns}-{cfg.max_turns}")
@@ -586,7 +579,7 @@ def augment_conversations(
     if rng is None:
         rng = random.Random(cfg.random_seed)
 
-    print(f"\n── Conversation augmentation ─────────────────────────────────────")
+    print("\n── Conversation augmentation ─────────────────────────────────────")
     print(f"  Source: {cfg.source_dataset_id}")
     print(f"  Backend: {cfg.backend}")
     print(f"  Target conversations: {cfg.n_conversations}")

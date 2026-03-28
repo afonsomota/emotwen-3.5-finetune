@@ -32,6 +32,7 @@ import re
 from src.config import (
     MAX_SEQ_LENGTH,
     LOAD_IN_4BIT,
+    SYSTEM_PROMPT_BASE,
     DEFAULT_EVAL_CONFIG,
     DEFAULT_MULTI_TURN_EVAL_CONFIG,
     DEFAULT_WANDB_CONFIG,
@@ -360,7 +361,6 @@ def eval_multi_turn(
     dict with summary metrics and per-conversation detail rows.
     """
     import random as _random
-    import numpy as np
 
     if rng is None:
         rng = _random.Random(42)
@@ -549,11 +549,11 @@ def eval_multi_turn(
     print(f"  Mean self-BLEU:                          {results['mt_mean_self_bleu']:.3f}")
     print(f"  Mean contextual relevance:               {mean_relevance:.3f}")
     print(f"  Off-topic rate (< {mt_cfg.relevance_threshold}):              {off_topic_rate:.1%}")
-    print(f"\n  Self-BLEU by turn position:")
+    print("\n  Self-BLEU by turn position:")
     for t, b in enumerate(bleu_by_turn, 1):
         bar = "█" * int(b * 40)
         print(f"    Turn {t}: {b:.3f}  {bar}")
-    print(f"\n  Relevance by turn position:")
+    print("\n  Relevance by turn position:")
     for t, r in enumerate(relevance_by_turn, 1):
         bar = "█" * int(r * 40) if r == r else "?"
         print(f"    Turn {t}: {r:.3f}  {bar}")
