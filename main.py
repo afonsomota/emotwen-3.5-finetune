@@ -30,6 +30,7 @@ Examples:
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -89,7 +90,13 @@ def main():
         help="Config overrides (e.g. max_empathetic=5000)",
     )
     args = parser.parse_args()
-    overrides = _parse_overrides(args.overrides)
+
+    # Also pick up overrides from the environment variable (set by provisioning.sh
+    # in headless mode). Environment overrides are appended after CLI overrides so
+    # that CLI arguments always take precedence.
+    env_override_str = os.environ.get("EMOTWEN_OVERRIDES", "").strip()
+    env_override_pairs = env_override_str.split() if env_override_str else []
+    overrides = _parse_overrides(args.overrides + env_override_pairs)
 
     if args.stage in ("full_train", "full_train_with_gen"):
         stages = FULL_TRAIN_WITH_GEN if args.stage == "full_train_with_gen" else FULL_TRAIN

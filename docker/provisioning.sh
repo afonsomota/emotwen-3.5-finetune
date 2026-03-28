@@ -98,7 +98,7 @@ fi
 # ── HuggingFace login ───────────────────────────────────────────────────────
 if [ -n "$HF_TOKEN" ]; then
     echo "[provisioning] Logging in to HuggingFace Hub..."
-    python -c "from huggingface_hub import login; login(token='${HF_TOKEN}')"
+    python -c "import os; from huggingface_hub import login; login(token=os.environ['HF_TOKEN'])"
 fi
 
 echo ""
@@ -166,8 +166,7 @@ if [ "${EMOTWEN_HEADLESS:-false}" = "true" ]; then
     cloud_sync_down
 
     cd "$REPO_DIR"
-    # shellcheck disable=SC2086
-    python main.py "$STAGE" ${EMOTWEN_OVERRIDES:-}
+    python main.py "$STAGE"
 
     echo ""
     echo "[headless] Pipeline complete."

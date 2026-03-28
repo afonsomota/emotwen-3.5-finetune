@@ -208,3 +208,7 @@ __marimo__/
 
 # MacOS
 .DS_Store
+
+data
+outputs
+wandb/
