@@ -25,7 +25,6 @@ import wandb
 from datasets import load_from_disk
 
 from src.config import (
-    MODEL_NAME,
     MAX_SEQ_LENGTH,
     LOAD_IN_4BIT,
     SYSTEM_PROMPT_GRPO,

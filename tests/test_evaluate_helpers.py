@@ -4,7 +4,6 @@ No GPU, no model downloads, no W&B.
 """
 
 import math
-import pytest
 
 from src.evaluate import _emotion_alignment_rate
 

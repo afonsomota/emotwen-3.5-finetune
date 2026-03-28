@@ -4,7 +4,6 @@ All tests use hand-crafted in-memory mock data — no load_dataset, no W&B.
 """
 
 import random
-import pytest
 
 from tests.conftest import (
     MOCK_SYSTEM_PROMPT,

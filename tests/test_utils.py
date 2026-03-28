@@ -4,7 +4,6 @@ Tests for src/utils.py:
   _extract_text, length_reward, advice_penalty_reward
 """
 
-import pytest
 from src.utils import (
     count_sentences,
     sentence_range_ok,

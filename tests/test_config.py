@@ -5,7 +5,6 @@ Tests for src/config.py:
 """
 
 import re
-import pytest
 
 from src.config import (
     DataConfig,

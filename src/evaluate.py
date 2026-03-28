@@ -30,10 +30,8 @@ from tqdm import tqdm
 import re
 
 from src.config import (
-    MODEL_NAME,
     MAX_SEQ_LENGTH,
     LOAD_IN_4BIT,
-    SYSTEM_PROMPT_BASE,
     DEFAULT_EVAL_CONFIG,
     DEFAULT_MULTI_TURN_EVAL_CONFIG,
     DEFAULT_WANDB_CONFIG,
@@ -690,7 +688,7 @@ def run(config_overrides: dict | None = None) -> dict:
     pct_in_range = in_range / non_exempt if non_exempt else 0.0
     pct_over_5 = over_5 / non_exempt if non_exempt else 0.0
 
-    print(f"\n── Sentence count distribution (non-exempt) ──")
+    print("\n── Sentence count distribution (non-exempt) ──")
     for k in sorted(dist):
         bar = "█" * dist[k]
         print(f"  {k:2d} sentences: {dist[k]:4d}  {bar}")
