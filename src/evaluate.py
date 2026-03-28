@@ -27,6 +27,7 @@ import wandb
 from datasets import load_from_disk
 from tqdm import tqdm
 
+import random
 import re
 
 from src.config import (
@@ -345,7 +346,7 @@ def eval_multi_turn(
     tokenizer,
     eval_ds,
     mt_cfg: MultiTurnEvalConfig,
-    rng=None,
+    rng: random.Random | None = None,
 ) -> dict:
     """
     Simulate multi-turn conversations and measure repetition + context drift.

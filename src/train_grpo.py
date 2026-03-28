@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 import wandb
-from datasets import load_from_disk
+from datasets import Dataset, load_from_disk
 
 from src.config import (
     MAX_SEQ_LENGTH,
@@ -68,7 +68,7 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
 
 # ─── GRPO dataset preparation ─────────────────────────────────────────────────
 
-def _make_grpo_dataset(tokenizer, n_prompts: int):
+def _make_grpo_dataset(tokenizer, n_prompts: int) -> Dataset:
     """
     Build a prompt-only dataset for GRPO from the SFT training set.
 
@@ -112,7 +112,7 @@ def _make_grpo_dataset(tokenizer, n_prompts: int):
 
 # ─── Save and merge ────────────────────────────────────────────────────────────
 
-def _save_merged_model(model, tokenizer, output_dir: str):
+def _save_merged_model(model, tokenizer, output_dir: str) -> None:
     """Save a merged 16-bit model for deployment (vLLM / llama.cpp / Ollama)."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     model.save_pretrained_merged(output_dir, tokenizer, save_method="merged_16bit")

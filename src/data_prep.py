@@ -587,7 +587,7 @@ def _go_emotions_to_messages(
     rag_fraction: float,
     rag_pool: dict[str, list[str]],
     rng: random.Random,
-    label_feature=None,
+    label_feature: object | None = None,
     source_tag: str = "go_emotions_synthetic",
 ) -> list[dict]:
     """Create synthetic single-turn journal conversations from go_emotions."""

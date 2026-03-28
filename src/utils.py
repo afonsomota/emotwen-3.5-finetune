@@ -3,6 +3,8 @@ Shared utilities: sentence counting, advice detection, reward functions,
 multi-turn eval metrics, and chat template helpers.
 """
 
+from __future__ import annotations
+
 import re
 import math
 import nltk
@@ -78,7 +80,7 @@ def count_advice_matches(text: str) -> int:
 
 # ─── Multi-turn evaluation metrics ───────────────────────────────────────────
 
-def _ngrams(tokens: list[str], n: int) -> Counter:
+def _ngrams(tokens: list[str], n: int) -> Counter[tuple[str, ...]]:
     """Extract n-gram counts from a token list."""
     return Counter(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
 
@@ -109,7 +111,7 @@ def self_bleu(response_a: str, response_b: str, max_n: int = 4) -> float:
     return math.exp(log_avg)
 
 
-def pairwise_self_bleu(assistant_turns: list[str], max_n: int = 4) -> dict:
+def pairwise_self_bleu(assistant_turns: list[str], max_n: int = 4) -> dict[str, float | list[float]]:
     """
     Compute self-BLEU between all pairs of assistant turns in a conversation.
 
