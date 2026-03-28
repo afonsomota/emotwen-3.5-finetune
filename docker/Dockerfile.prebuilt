@@ -13,24 +13,33 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
 # ── Unsloth + Zoo ────────────────────────────────────────────────────────────
-RUN uv pip install --system \
+RUN uv pip install --system --break-system-packages \
     'unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo' \
     'unsloth[base] @ git+https://github.com/unslothai/unsloth'
 
 # ── Pin TRL ──────────────────────────────────────────────────────────────────
-RUN uv pip install --system --upgrade --no-deps tokenizers 'trl==0.22.2' unsloth unsloth_zoo
+RUN uv pip install --system --break-system-packages --upgrade --no-deps tokenizers 'trl==0.22.2' unsloth unsloth_zoo
 
-# ── Flash Attention 2 (CUDA compilation — needs GPU at build time) ───────────
-RUN uv pip install --system --no-build-isolation flash-attn
+# ── Flash Attention 2 ────────────────────────────────────────────────────────
+# NOTE: flash-attn requires nvcc + GPU at build time. Install at runtime via
+# provisioning.sh, or uncomment below when building on a GPU machine:
+# RUN uv pip install --system --break-system-packages --no-build-isolation flash-attn
 
 # ── Flash Linear Attention + causal_conv1d ───────────────────────────────────
-RUN uv pip install --system --no-build-isolation flash-linear-attention 'causal_conv1d==1.6.0'
+# NOTE: Also requires nvcc. Install at runtime via provisioning.sh, or
+# uncomment below when building on a GPU machine:
+# RUN uv pip install --system --break-system-packages --no-build-isolation flash-linear-attention 'causal_conv1d==1.6.0'
 
 # ── Data, tracking, optional packages ────────────────────────────────────────
-RUN uv pip install --system \
+RUN uv pip install --system --break-system-packages \
     wandb datasets nltk huggingface_hub tqdm \
     openai anthropic sentence-transformers bitsandbytes
 
 # ── NLTK data ────────────────────────────────────────────────────────────────
-RUN python -c "import nltk; nltk.download('punkt_tab', download_dir='/opt/nltk_data')"
+# Download punkt_tab directly (avoids SIGILL under x86 emulation)
+RUN mkdir -p /opt/nltk_data/tokenizers && \
+    curl -sSL https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/tokenizers/punkt_tab.zip \
+    -o /tmp/punkt_tab.zip && \
+    unzip -q /tmp/punkt_tab.zip -d /opt/nltk_data/tokenizers/ && \
+    rm /tmp/punkt_tab.zip
 ENV NLTK_DATA=/opt/nltk_data
