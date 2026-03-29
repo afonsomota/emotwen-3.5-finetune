@@ -713,6 +713,7 @@ def run(config_overrides: dict | None = None) -> dict:
     """
     cfg: EvalConfig = DEFAULT_EVAL_CONFIG
     wb_cfg: WandbConfig = DEFAULT_WANDB_CONFIG
+    errors: list[str] = []
 
     apply_overrides(config_overrides, cfg, wb_cfg)
 
@@ -828,6 +829,7 @@ def run(config_overrides: dict | None = None) -> dict:
         torch.cuda.empty_cache()
     except Exception as e:
         print(f"   Emotion alignment skipped: {e}")
+        errors.append(f"emotion_alignment: {e}")
 
     # ── LLM-as-judge ─────────────────────────────────────────────────────────
     judge_scores: list[dict] = []
@@ -869,6 +871,7 @@ def run(config_overrides: dict | None = None) -> dict:
         print(f"   Perplexity proxy (mean NLL/token): {perplexity:.4f}")
     except Exception as e:
         print(f"   Perplexity skipped: {e}")
+        errors.append(f"perplexity: {e}")
 
     # ── Multi-turn evaluation ────────────────────────────────────────────────
     mt_cfg = DEFAULT_MULTI_TURN_EVAL_CONFIG
@@ -933,6 +936,7 @@ def run(config_overrides: dict | None = None) -> dict:
         wandb.log(mt_scalars)
     except Exception as e:
         print(f"   Multi-turn evaluation skipped: {e}")
+        errors.append(f"multi_turn_eval: {e}")
 
     # ── GRPO decision ─────────────────────────────────────────────────────────
     grpo_needed = pct_over_5 > cfg.grpo_trigger_pct
@@ -958,6 +962,7 @@ def run(config_overrides: dict | None = None) -> dict:
         "n_evaluated": len(responses),
         "n_exempt": exempt_count,
         **{k: v for k, v in mt_results.items() if not isinstance(v, list)},
+        "errors": errors,
     }
 
     Path(cfg.results_save_path).parent.mkdir(parents=True, exist_ok=True)

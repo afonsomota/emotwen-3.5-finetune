@@ -42,8 +42,15 @@ from src.utils import apply_overrides, length_reward, advice_penalty_reward, wan
 # ─── Model loading ─────────────────────────────────────────────────────────────
 
 def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
-    """Load SFT adapter and re-apply smaller LoRA for GRPO stability."""
+    """Load SFT adapter and re-apply smaller LoRA for GRPO stability.
+
+    If sft_adapter_path points to a saved LoRA adapter directory, the adapter
+    is already embedded in the loaded model, so get_peft_model() must be
+    skipped to avoid double-wrapping the model.
+    """
     from unsloth import FastLanguageModel
+
+    is_adapter = (Path(sft_adapter_path) / "adapter_config.json").exists()
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=sft_adapter_path,
@@ -52,16 +59,17 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
         use_gradient_checkpointing="unsloth",
     )
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_cfg.r,
-        lora_alpha=lora_cfg.lora_alpha,
-        lora_dropout=lora_cfg.lora_dropout,
-        bias=lora_cfg.bias,
-        target_modules=lora_cfg.target_modules,
-        random_state=lora_cfg.random_state,
-        use_rslora=lora_cfg.use_rslora,
-    )
+    if not is_adapter:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_cfg.r,
+            lora_alpha=lora_cfg.lora_alpha,
+            lora_dropout=lora_cfg.lora_dropout,
+            bias=lora_cfg.bias,
+            target_modules=lora_cfg.target_modules,
+            random_state=lora_cfg.random_state,
+            use_rslora=lora_cfg.use_rslora,
+        )
 
     return model, tokenizer
 
