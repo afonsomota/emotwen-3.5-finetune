@@ -70,9 +70,11 @@ uv pip install \
 
 # ── Pin TRL + transformers versions ──────────────────────────────────────────
 # TRL 0.26.2 from Unsloth GRPO notebook (0.22.2 has hard vllm dependency)
+# pydantic<2.12 required: mergekit's Task[Tensor] breaks pydantic 2.12+
 echo "[provisioning] Pinning TRL + transformers..."
 uv pip install --upgrade --no-deps tokenizers 'trl==0.26.2' unsloth unsloth_zoo
-uv pip install 'transformers==5.3.0' weave mergekit
+uv pip install --no-deps weave mergekit
+uv pip install 'transformers==5.3.0' 'pydantic>=2.10,<2.12'
 
 # ── Flash attention extensions ──────────────────────────────────────────────
 echo "[provisioning] Building flash-linear-attention + causal_conv1d (~10 min)..."
