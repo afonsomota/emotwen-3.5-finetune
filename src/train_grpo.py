@@ -42,13 +42,16 @@ from src.utils import apply_overrides, length_reward, advice_penalty_reward, wan
 # ─── Model loading ─────────────────────────────────────────────────────────────
 
 def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
-    """Load SFT adapter and apply a fresh smaller LoRA for GRPO training.
+    """Load SFT adapter for GRPO training.
 
-    Unlike SFT Stage 2 (which continues training the existing adapter),
-    GRPO intentionally applies a NEW, smaller LoRA on top of the merged
-    SFT model for training stability.
+    When loading from a saved LoRA adapter directory, the adapter is
+    already embedded in the model by FastLanguageModel.from_pretrained(),
+    so get_peft_model() must be skipped to avoid the "already added LoRA"
+    error. This matches the pattern used in SFT Stage 2.
     """
     from unsloth import FastLanguageModel
+
+    is_adapter = (Path(sft_adapter_path) / "adapter_config.json").exists()
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=sft_adapter_path,
@@ -57,16 +60,17 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
         use_gradient_checkpointing="unsloth",
     )
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_cfg.r,
-        lora_alpha=lora_cfg.lora_alpha,
-        lora_dropout=lora_cfg.lora_dropout,
-        bias=lora_cfg.bias,
-        target_modules=lora_cfg.target_modules,
-        random_state=lora_cfg.random_state,
-        use_rslora=lora_cfg.use_rslora,
-    )
+    if not is_adapter:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_cfg.r,
+            lora_alpha=lora_cfg.lora_alpha,
+            lora_dropout=lora_cfg.lora_dropout,
+            bias=lora_cfg.bias,
+            target_modules=lora_cfg.target_modules,
+            random_state=lora_cfg.random_state,
+            use_rslora=lora_cfg.use_rslora,
+        )
 
     return model, tokenizer
 
