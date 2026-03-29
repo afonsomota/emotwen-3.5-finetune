@@ -104,16 +104,21 @@ def run_generate() -> dict | None:
 def run_data_prep() -> dict | None:
     from src.data_prep import run
     overrides = {
-        "max_empathetic": 5,
-        "max_daily_dialog": 5,
-        "max_go_emotions_synthetic": 5,
-        "max_counsel_chat": 5,
+        # Use enough samples so that after eval holdout (5) and 90/10 split,
+        # both train and val contain at least 1 row from each stage's sources.
+        # Stage 1 (tone): empathetic_dialogues + daily_dialog
+        # Stage 2 (domain): go_emotions_synthetic + dair_emotion_synthetic + counsel_chat_synthetic
+        "max_empathetic": 25,
+        "max_daily_dialog": 25,
+        "max_go_emotions_synthetic": 25,
+        "max_dair_emotion": 25,   # was hardcoded 2000 in data_prep.py — now uses cfg field
+        "max_counsel_chat": 25,
         # Force inline generation (don't download from HF Hub).
         # The generate step above saved locally but data_prep's Hub path
         # would try to download from HF.  Setting None triggers inline
         # generation from the same source HF datasets with minimal samples.
         "synthetic_hub_id": None,
-        "let_me_explain_examples": 2,
+        "let_me_explain_examples": 5,
         "eval_holdout_size": 5,
         "report_to": "none",
     }

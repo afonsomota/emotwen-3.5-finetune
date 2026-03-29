@@ -734,7 +734,7 @@ def _generate_synthetic_inline(cfg: "DataConfig", rng: random.Random) -> list[di
     print(f"    go_emotions synthetic: {len(ge_convs)} conversations")
 
     print("  dair-ai/emotion")
-    em_train = _load_and_sample(cfg.dair_emotion_id, None, "train", 2000, rng)
+    em_train = _load_and_sample(cfg.dair_emotion_id, None, "train", cfg.max_dair_emotion, rng)
     em_convs = _dair_emotion_to_messages(em_train, SYSTEM_PROMPT_BASE, rng)
     print(f"    dair emotion synthetic: {len(em_convs)} conversations")
 
