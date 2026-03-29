@@ -44,24 +44,28 @@ from src.utils import apply_overrides, length_reward, advice_penalty_reward, wan
 def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
     """Load SFT adapter for GRPO training.
 
-    When loading from a saved LoRA adapter directory, the adapter is
-    already embedded in the model by FastLanguageModel.from_pretrained(),
-    so get_peft_model() must be skipped to avoid the "already added LoRA"
-    error. This matches the pattern used in SFT Stage 2.
+    Uses FastVisionModel (not FastLanguageModel) because Qwen 3.5 is a
+    VLM (ForConditionalGeneration). FastLanguageModel routes through
+    compiled kernels that crash during GRPO's accumulated loss computation
+    (rotary embedding shape mismatch).
+
+    fast_inference=False is required for GRPO compatibility.
+    finetune_vision_layers=False keeps training text-only.
     """
-    from unsloth import FastLanguageModel
+    from unsloth import FastVisionModel
 
     is_adapter = (Path(sft_adapter_path) / "adapter_config.json").exists()
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    model, tokenizer = FastVisionModel.from_pretrained(
         model_name=sft_adapter_path,
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=LOAD_IN_4BIT,
         use_gradient_checkpointing="unsloth",
+        fast_inference=False,
     )
 
     if not is_adapter:
-        model = FastLanguageModel.get_peft_model(
+        model = FastVisionModel.get_peft_model(
             model,
             r=lora_cfg.r,
             lora_alpha=lora_cfg.lora_alpha,
@@ -70,6 +74,8 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
             target_modules=lora_cfg.target_modules,
             random_state=lora_cfg.random_state,
             use_rslora=lora_cfg.use_rslora,
+            finetune_vision_layers=False,
+            finetune_language_layers=True,
         )
 
     return model, tokenizer
