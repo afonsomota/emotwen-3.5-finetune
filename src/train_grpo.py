@@ -195,7 +195,7 @@ def run(config_overrides: dict | None = None) -> dict:
 
     grpo_args = GRPOConfig(
         num_generations=grpo_cfg.num_generations,
-        max_new_tokens=grpo_cfg.max_new_tokens,
+        max_completion_length=grpo_cfg.max_new_tokens,
         temperature=grpo_cfg.temperature,
         per_device_train_batch_size=grpo_cfg.per_device_train_batch_size,
         gradient_accumulation_steps=grpo_cfg.gradient_accumulation_steps,

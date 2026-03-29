@@ -295,24 +295,19 @@ def _compute_perplexity(
         attention_mask = enc["attention_mask"].to(device)
 
         with torch.no_grad():
-            # Use the underlying language model to avoid Unsloth's VL
-            # attention patching which can reshape logits unexpectedly.
-            lm = getattr(model, "language_model", model)
-            out = lm(input_ids=input_ids, attention_mask=attention_mask)
+            # Pass labels so the model computes loss internally.
+            # This avoids manual logit shifting and works regardless of
+            # Unsloth's VL attention patching.
+            out = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=input_ids,
+            )
 
-        logits = out.logits if hasattr(out, "logits") else out[0]
-        shift_logits = logits[:, :-1, :].contiguous()   # [1, L-1, V]
-        shift_labels = input_ids[:, 1:].contiguous()        # [1, L-1]
-
-        # Per-token NLL, shape [1, L-1]
-        per_token_nll = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-            reduction="none",
-        )
-
-        total_nll += per_token_nll.sum().item()
-        total_tokens += per_token_nll.numel()
+        if out.loss is not None:
+            seq_len = attention_mask.sum().item() - 1  # tokens used in loss
+            total_nll += out.loss.item() * seq_len
+            total_tokens += seq_len
 
     tokenizer.padding_side = orig_padding_side
     return total_nll / total_tokens if total_tokens > 0 else float("nan")
