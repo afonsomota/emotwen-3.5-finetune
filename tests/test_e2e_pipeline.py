@@ -14,6 +14,13 @@ Exit code 0 = all stages passed, 1 = at least one failure.
 from __future__ import annotations
 
 import os
+
+# ── Environment patches (must be set before ANY torch/transformers import) ───
+# Disable torch.compile / dynamo — Unsloth's compiled cache for Qwen 3.5 VL
+# has rotary embedding concat bugs with newer torch on some GPUs (5070 Ti).
+os.environ["TORCHDYNAMO_DISABLE"] = "1"
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
 import sys
 import time
 import traceback
@@ -25,10 +32,6 @@ from pathlib import Path
 import transformers.utils.hub as _hub
 if not hasattr(_hub, "TRANSFORMERS_CACHE"):
     _hub.TRANSFORMERS_CACHE = os.path.expanduser("~/.cache/huggingface/hub")
-
-# Disable torch.compile / dynamo — Unsloth's compiled cache for Qwen 3.5 VL
-# has rotary embedding concat bugs with newer torch on some GPUs (5070 Ti).
-os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 # ── Disable W&B before any imports that might call wandb.init() ──────────────
 os.environ["WANDB_MODE"] = "disabled"
