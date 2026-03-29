@@ -295,11 +295,13 @@ def _compute_perplexity(
         attention_mask = enc["attention_mask"].to(device)
 
         with torch.no_grad():
-            out = model(input_ids=input_ids, attention_mask=attention_mask)
+            # Use the underlying language model to avoid Unsloth's VL
+            # attention patching which can reshape logits unexpectedly.
+            lm = getattr(model, "language_model", model)
+            out = lm(input_ids=input_ids, attention_mask=attention_mask)
 
-        # logits shape from a single sequence is always [1, L, V] — no padding
-        # so shift_logits/shift_labels are guaranteed to be the same length.
-        shift_logits = out.logits[:, :-1, :].contiguous()   # [1, L-1, V]
+        logits = out.logits if hasattr(out, "logits") else out[0]
+        shift_logits = logits[:, :-1, :].contiguous()   # [1, L-1, V]
         shift_labels = input_ids[:, 1:].contiguous()        # [1, L-1]
 
         # Per-token NLL, shape [1, L-1]
