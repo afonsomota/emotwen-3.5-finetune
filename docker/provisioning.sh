@@ -69,9 +69,10 @@ uv pip install \
     'unsloth[base] @ git+https://github.com/unslothai/unsloth'
 
 # ── Pin TRL + transformers versions ──────────────────────────────────────────
+# TRL 0.26.2 from Unsloth GRPO notebook (0.22.2 has hard vllm dependency)
 echo "[provisioning] Pinning TRL + transformers..."
-uv pip install --upgrade --no-deps tokenizers 'trl==0.22.2' unsloth unsloth_zoo
-uv pip install 'transformers==5.2.0'
+uv pip install --upgrade --no-deps tokenizers 'trl==0.26.2' unsloth unsloth_zoo
+uv pip install 'transformers==5.3.0' weave mergekit
 
 # ── Flash attention extensions ──────────────────────────────────────────────
 echo "[provisioning] Building flash-linear-attention + causal_conv1d (~10 min)..."
