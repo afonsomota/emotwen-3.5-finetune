@@ -60,15 +60,18 @@ if ! command -v uv &>/dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# ── Unsloth (must come after torch) ─────────────────────────────────────────
-echo "[provisioning] Installing Unsloth..."
+# ── Unsloth + pinned torch (must match official Unsloth notebook) ────────────
+# Versions from: github.com/unslothai/notebooks/blob/main/nb/Qwen3_5_(0_8B)_Vision.ipynb
+echo "[provisioning] Installing Unsloth + torch 2.8.0..."
 uv pip install \
+    'torch==2.8.0' 'triton>=3.3.0' torchvision bitsandbytes 'xformers==0.0.32.post2' \
     'unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo' \
     'unsloth[base] @ git+https://github.com/unslothai/unsloth'
 
-# ── Pin TRL version ───────────────────────────────────────────────────────
-echo "[provisioning] Pinning TRL..."
+# ── Pin TRL + transformers versions ──────────────────────────────────────────
+echo "[provisioning] Pinning TRL + transformers..."
 uv pip install --upgrade --no-deps tokenizers 'trl==0.22.2' unsloth unsloth_zoo
+uv pip install 'transformers==5.2.0'
 
 # ── Flash attention extensions ──────────────────────────────────────────────
 echo "[provisioning] Building flash-linear-attention + causal_conv1d (~10 min)..."
