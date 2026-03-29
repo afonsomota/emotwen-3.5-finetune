@@ -19,6 +19,13 @@ import time
 import traceback
 from pathlib import Path
 
+# ── Compatibility patches ────────────────────────────────────────────────────
+# TRL 0.24 imports TRANSFORMERS_CACHE which was removed in transformers 5.3+.
+# Monkey-patch it before anything imports TRL.
+import transformers.utils.hub as _hub
+if not hasattr(_hub, "TRANSFORMERS_CACHE"):
+    _hub.TRANSFORMERS_CACHE = os.path.expanduser("~/.cache/huggingface/hub")
+
 # ── Disable W&B before any imports that might call wandb.init() ──────────────
 os.environ["WANDB_MODE"] = "disabled"
 os.environ["WANDB_SILENT"] = "true"
