@@ -231,7 +231,6 @@ def run(config_overrides: dict | None = None) -> dict:
             for cfg in (lora_cfg, s1_cfg, s2_cfg, wb_cfg):
                 if hasattr(cfg, k):
                     setattr(cfg, k, v)
-                    break
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     results: dict = {}
