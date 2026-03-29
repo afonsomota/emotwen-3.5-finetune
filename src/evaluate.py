@@ -277,41 +277,40 @@ def _compute_perplexity(
 
     import torch.nn.functional as F
 
-    for start in tqdm(range(0, len(texts), batch_size), desc="Perplexity"):
-        batch_texts = texts[start:start + batch_size]
-        enc = tokenizer(
-            text=batch_texts, padding=True, truncation=True,
+    # Process one sequence at a time to avoid shape mismatches caused by
+    # Unsloth's VL-patched attention when batches contain padded sequences.
+    # The VL model's forward may return logits with a different sequence
+    # dimension than input_ids when attention masking interacts with the
+    # patched kernels, causing "tensor a (N) must match tensor b (M)" errors.
+    for text in tqdm(texts, desc="Perplexity"):
+        # Tokenize without padding — single sequence, no pad tokens needed.
+        # Use the underlying text tokenizer if this is a VL processor to
+        # avoid image-source validation on the formatted chat text.
+        underlying_tok = getattr(tokenizer, "tokenizer", tokenizer)
+        enc = underlying_tok(
+            text, truncation=True,
             max_length=MAX_SEQ_LENGTH, return_tensors="pt"
         )
-        input_ids = enc["input_ids"].to(device)          # [B, L]
+        input_ids = enc["input_ids"].to(device)          # [1, L]
         attention_mask = enc["attention_mask"].to(device)
 
         with torch.no_grad():
-            out = model(input_ids, attention_mask=attention_mask)
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-        # Manually shift logits/labels so we control the shapes explicitly.
-        # logits: [B, L, V]  →  shift_logits: [B, L-1, V]
-        # labels: [B, L]     →  shift_labels: [B, L-1]
-        shift_logits = out.logits[:, :-1, :].contiguous()   # [B, L-1, V]
-        shift_labels = input_ids[:, 1:].contiguous()        # [B, L-1]
-        shift_mask   = attention_mask[:, 1:].contiguous()   # [B, L-1]
+        # logits shape from a single sequence is always [1, L, V] — no padding
+        # so shift_logits/shift_labels are guaranteed to be the same length.
+        shift_logits = out.logits[:, :-1, :].contiguous()   # [1, L-1, V]
+        shift_labels = input_ids[:, 1:].contiguous()        # [1, L-1]
 
-        # Mask pad tokens so they don't contribute to NLL.
-        # Use attention_mask (not pad_token_id check) to avoid masking genuine
-        # EOS tokens in sequences where pad_token_id == eos_token_id.
-        shift_labels = shift_labels.masked_fill(shift_mask == 0, -100)
-
-        # Per-token NLL, shape [B, L-1]; -100 positions → 0 due to ignore_index
+        # Per-token NLL, shape [1, L-1]
         per_token_nll = F.cross_entropy(
             shift_logits.view(-1, shift_logits.size(-1)),
             shift_labels.view(-1),
-            ignore_index=-100,
             reduction="none",
-        ).view(shift_labels.shape)                           # [B, L-1]
+        )
 
-        n_real = (shift_labels != -100).sum().item()
         total_nll += per_token_nll.sum().item()
-        total_tokens += n_real
+        total_tokens += per_token_nll.numel()
 
     tokenizer.padding_side = orig_padding_side
     return total_nll / total_tokens if total_tokens > 0 else float("nan")
@@ -428,37 +427,37 @@ def eval_multi_turn(
             user_turns_used.append(user_msg)
 
             # Generate assistant response.
-            # Use tokenize=True directly in apply_chat_template to avoid
-            # re-passing the formatted string through the tokenizer/processor.
-            # On VL-variant tokenizers the two-step pattern (apply_chat_template
-            # tokenize=False → tokenizer(text)) can trigger an image-source
-            # validation error because the processor tries to resolve image
-            # placeholders embedded in the chat-template output.
+            # For Unsloth VL processors, calling apply_chat_template with
+            # tokenize=True or passing the formatted string back through the
+            # processor both trigger "Incorrect image source" validation because
+            # the VL processor tries to resolve image placeholders in the text.
+            # The safe path is to always use the underlying text tokenizer
+            # (processor.tokenizer) which skips image validation entirely.
+            import re as _re
+            # Step 1: get the formatted prompt text via the chat template.
+            # Use tokenize=False here — we will tokenize manually below.
             try:
-                input_ids = tokenizer.apply_chat_template(
-                    context,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=MAX_SEQ_LENGTH,
-                )
-                inputs = {"input_ids": input_ids.to(device)}
-                # Build attention_mask (all ones — no padding for single sequence)
-                inputs["attention_mask"] = torch.ones_like(input_ids).to(device)
-            except Exception:
-                # Fallback: strip the formatted text and tokenize manually.
-                import re as _re
                 prompt_text = tokenizer.apply_chat_template(
                     context, add_generation_prompt=True, tokenize=False
                 )
-                # Remove any residual vision special-token markup that VL
-                # tokenizers may embed (e.g. <|vision_start|>...<|vision_end|>).
-                prompt_text = _re.sub(r"<\|vision_start\|>.*?<\|vision_end\|>", "", prompt_text, flags=_re.DOTALL)
-                inputs = tokenizer(
-                    prompt_text, truncation=True,
-                    max_length=MAX_SEQ_LENGTH, return_tensors="pt"
-                ).to(device)
+            except Exception as _e1:
+                # If even the text-only template call fails, build a minimal
+                # fallback prompt from the raw message contents.
+                prompt_text = "\n".join(
+                    f"{m['role'].upper()}: {m['content']}" for m in context
+                ) + "\nASSISTANT:"
+
+            # Step 2: strip any residual vision special-token markup that the
+            # chat template may have injected (e.g. <|vision_start|>...<|vision_end|>).
+            prompt_text = _re.sub(r"<\|vision_start\|>.*?<\|vision_end\|>", "", prompt_text, flags=_re.DOTALL)
+
+            # Step 3: tokenize using the underlying HF text tokenizer so the
+            # VL processor's image validation is bypassed entirely.
+            underlying_tok = getattr(tokenizer, "tokenizer", tokenizer)
+            inputs = underlying_tok(
+                prompt_text, truncation=True,
+                max_length=MAX_SEQ_LENGTH, return_tensors="pt"
+            ).to(device)
             input_len = inputs["input_ids"].shape[1]
 
             with torch.no_grad():
