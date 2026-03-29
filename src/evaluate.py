@@ -275,24 +275,43 @@ def _compute_perplexity(
     total_nll = 0.0
     total_tokens = 0
 
+    import torch.nn.functional as F
+
     for start in tqdm(range(0, len(texts), batch_size), desc="Perplexity"):
         batch_texts = texts[start:start + batch_size]
         enc = tokenizer(
             text=batch_texts, padding=True, truncation=True,
             max_length=MAX_SEQ_LENGTH, return_tensors="pt"
         )
-        input_ids = enc["input_ids"].to(device)
+        input_ids = enc["input_ids"].to(device)          # [B, L]
         attention_mask = enc["attention_mask"].to(device)
 
-        labels = input_ids.clone()
-        labels[labels == tokenizer.pad_token_id] = -100
-
         with torch.no_grad():
-            out = model(input_ids, attention_mask=attention_mask, labels=labels)
+            out = model(input_ids, attention_mask=attention_mask)
 
-        n_real_tokens = (labels != -100).sum().item()
-        total_nll += out.loss.item() * n_real_tokens
-        total_tokens += n_real_tokens
+        # Manually shift logits/labels so we control the shapes explicitly.
+        # logits: [B, L, V]  →  shift_logits: [B, L-1, V]
+        # labels: [B, L]     →  shift_labels: [B, L-1]
+        shift_logits = out.logits[:, :-1, :].contiguous()   # [B, L-1, V]
+        shift_labels = input_ids[:, 1:].contiguous()        # [B, L-1]
+        shift_mask   = attention_mask[:, 1:].contiguous()   # [B, L-1]
+
+        # Mask pad tokens so they don't contribute to NLL.
+        # Use attention_mask (not pad_token_id check) to avoid masking genuine
+        # EOS tokens in sequences where pad_token_id == eos_token_id.
+        shift_labels = shift_labels.masked_fill(shift_mask == 0, -100)
+
+        # Per-token NLL, shape [B, L-1]; -100 positions → 0 due to ignore_index
+        per_token_nll = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+            reduction="none",
+        ).view(shift_labels.shape)                           # [B, L-1]
+
+        n_real = (shift_labels != -100).sum().item()
+        total_nll += per_token_nll.sum().item()
+        total_tokens += n_real
 
     tokenizer.padding_side = orig_padding_side
     return total_nll / total_tokens if total_tokens > 0 else float("nan")
@@ -408,14 +427,38 @@ def eval_multi_turn(
             context.append({"role": "user", "content": user_msg})
             user_turns_used.append(user_msg)
 
-            # Generate assistant response
-            prompt_text = tokenizer.apply_chat_template(
-                context, add_generation_prompt=True, tokenize=False
-            )
-            inputs = tokenizer(
-                prompt_text, truncation=True,
-                max_length=MAX_SEQ_LENGTH, return_tensors="pt"
-            ).to(device)
+            # Generate assistant response.
+            # Use tokenize=True directly in apply_chat_template to avoid
+            # re-passing the formatted string through the tokenizer/processor.
+            # On VL-variant tokenizers the two-step pattern (apply_chat_template
+            # tokenize=False → tokenizer(text)) can trigger an image-source
+            # validation error because the processor tries to resolve image
+            # placeholders embedded in the chat-template output.
+            try:
+                input_ids = tokenizer.apply_chat_template(
+                    context,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=MAX_SEQ_LENGTH,
+                )
+                inputs = {"input_ids": input_ids.to(device)}
+                # Build attention_mask (all ones — no padding for single sequence)
+                inputs["attention_mask"] = torch.ones_like(input_ids).to(device)
+            except Exception:
+                # Fallback: strip the formatted text and tokenize manually.
+                import re as _re
+                prompt_text = tokenizer.apply_chat_template(
+                    context, add_generation_prompt=True, tokenize=False
+                )
+                # Remove any residual vision special-token markup that VL
+                # tokenizers may embed (e.g. <|vision_start|>...<|vision_end|>).
+                prompt_text = _re.sub(r"<\|vision_start\|>.*?<\|vision_end\|>", "", prompt_text, flags=_re.DOTALL)
+                inputs = tokenizer(
+                    prompt_text, truncation=True,
+                    max_length=MAX_SEQ_LENGTH, return_tensors="pt"
+                ).to(device)
             input_len = inputs["input_ids"].shape[1]
 
             with torch.no_grad():

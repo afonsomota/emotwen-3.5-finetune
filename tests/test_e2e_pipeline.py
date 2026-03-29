@@ -148,7 +148,7 @@ def run_eval() -> dict | None:
     overrides = {
         "n_samples": 5,
         "n_conversations": 3,
-        "grpo_trigger_pct": 0.0,  # force GRPO trigger
+        "grpo_trigger_pct": -1.0,  # force GRPO trigger (pct_over_5 >= 0.0 > -1.0 always)
         "judge_model": None,      # skip LLM judge (no API key in CI)
         "report_to": "none",
     }
