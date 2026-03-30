@@ -57,21 +57,13 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
 
     is_adapter = (Path(sft_adapter_path) / "adapter_config.json").exists()
 
-    if LOAD_IN_4BIT:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-        )
-    else:
-        bnb_config = None
-
     from src.config import MODEL_NAME
 
-    # Always load the base model first
+    # Load in bf16 (no 4-bit) — the 0.8B model fits easily in GPU memory,
+    # and bitsandbytes Triton kernels can exceed shared memory limits on
+    # some GPUs when not using Unsloth's optimized dequantization.
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        quantization_config=bnb_config,
         device_map="auto",
         torch_dtype=torch.bfloat16,
     )
