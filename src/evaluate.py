@@ -319,7 +319,7 @@ def _compute_perplexity(
         )
         seq_len = attention_mask.sum().item() - 1
         total_nll += loss.item() * seq_len
-            total_tokens += seq_len
+        total_tokens += seq_len
 
     tokenizer.padding_side = orig_padding_side
     return total_nll / total_tokens if total_tokens > 0 else float("nan")
