@@ -295,10 +295,11 @@ def _compute_perplexity(
         attention_mask = enc["attention_mask"].to(device)
 
         with torch.no_grad():
-            # Pass labels so the model computes loss internally.
-            # This avoids manual logit shifting and works regardless of
-            # Unsloth's VL attention patching.
-            out = model(
+            # Use the underlying language model to bypass Unsloth's VL
+            # compiled module which has a rotary embedding bug in
+            # apply_rotary_pos_emb (tensor dimension mismatch).
+            lm = getattr(model, "language_model", model)
+            out = lm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=input_ids,
