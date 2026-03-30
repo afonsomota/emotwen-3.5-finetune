@@ -3,6 +3,8 @@ Shared utilities: sentence counting, advice detection, reward functions,
 multi-turn eval metrics, and chat template helpers.
 """
 
+from __future__ import annotations
+
 import re
 import math
 import nltk
@@ -22,6 +24,33 @@ _ADVICE_RE = re.compile(ADVICE_REGEX_PATTERN, re.VERBOSE | re.IGNORECASE)
 
 # Minimum word count for a fragment to count as a sentence
 _MIN_SENTENCE_WORDS = 3
+
+# ─── Config override helper ──────────────────────────────────────────────────
+
+def apply_overrides(overrides: dict | None, *targets) -> None:
+    """Apply key/value overrides to the first target dataclass that has the key."""
+    if not overrides:
+        return
+    for k, v in overrides.items():
+        for target in targets:
+            if hasattr(target, k):
+                setattr(target, k, v)
+                break
+
+
+# ─── W&B run name helper ─────────────────────────────────────────────────────
+
+def wandb_run_name(
+    prefix: str,
+    run_ts: str,
+    overrides: dict | None = None,
+    key: str = "run_name",
+) -> str:
+    """Return a W&B run name from overrides or construct one from prefix + timestamp."""
+    if overrides and key in overrides:
+        return overrides[key]
+    return f"{prefix}_{run_ts}"
+
 
 # ─── Sentence counting ────────────────────────────────────────────────────────
 
@@ -78,7 +107,7 @@ def count_advice_matches(text: str) -> int:
 
 # ─── Multi-turn evaluation metrics ───────────────────────────────────────────
 
-def _ngrams(tokens: list[str], n: int) -> Counter:
+def _ngrams(tokens: list[str], n: int) -> Counter[tuple[str, ...]]:
     """Extract n-gram counts from a token list."""
     return Counter(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
 
@@ -109,7 +138,7 @@ def self_bleu(response_a: str, response_b: str, max_n: int = 4) -> float:
     return math.exp(log_avg)
 
 
-def pairwise_self_bleu(assistant_turns: list[str], max_n: int = 4) -> dict:
+def pairwise_self_bleu(assistant_turns: list[str], max_n: int = 4) -> dict[str, float | list[float]]:
     """
     Compute self-BLEU between all pairs of assistant turns in a conversation.
 
@@ -252,26 +281,3 @@ def _extract_text(completion: Any) -> str:
             return first.get("content", "").strip()
         return str(first).strip()
     return str(completion).strip()
-
-# ─── Chat template helpers ────────────────────────────────────────────────────
-
-def apply_chat_template(
-    tokenizer,
-    messages: list[dict],
-    add_generation_prompt: bool = True,
-    tokenize: bool = False,
-) -> str:
-    """
-    Thin wrapper around tokenizer.apply_chat_template.
-    Always returns a string (tokenize=False by default).
-    """
-    return tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=add_generation_prompt,
-        tokenize=tokenize,
-    )
-
-
-def messages_to_text(tokenizer, messages: list[dict]) -> str:
-    """Convert messages list to the full formatted string (no generation prompt)."""
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)

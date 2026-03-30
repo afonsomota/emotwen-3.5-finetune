@@ -60,15 +60,21 @@ if ! command -v uv &>/dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# ── Unsloth (must come after torch) ─────────────────────────────────────────
-echo "[provisioning] Installing Unsloth..."
+# ── Unsloth + pinned torch (must match official Unsloth notebook) ────────────
+# Versions from: github.com/unslothai/notebooks/blob/main/nb/Qwen3_5_(0_8B)_Vision.ipynb
+echo "[provisioning] Installing Unsloth + torch 2.8.0..."
 uv pip install \
+    'torch==2.8.0' 'triton>=3.3.0' torchvision bitsandbytes 'xformers==0.0.32.post2' \
     'unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo' \
     'unsloth[base] @ git+https://github.com/unslothai/unsloth'
 
-# ── Pin TRL version ───────────────────────────────────────────────────────
-echo "[provisioning] Pinning TRL..."
-uv pip install --upgrade --no-deps tokenizers 'trl==0.22.2' unsloth unsloth_zoo
+# ── Pin TRL + transformers versions ──────────────────────────────────────────
+# TRL 0.26.2 from Unsloth GRPO notebook (0.22.2 has hard vllm dependency)
+# pydantic<2.12 required: mergekit's Task[Tensor] breaks pydantic 2.12+
+echo "[provisioning] Pinning TRL + transformers..."
+uv pip install --upgrade --no-deps tokenizers 'trl==0.26.2' unsloth unsloth_zoo
+uv pip install --no-deps weave mergekit
+uv pip install 'transformers==5.3.0' 'pydantic>=2.10,<2.12'
 
 # ── Flash attention extensions ──────────────────────────────────────────────
 echo "[provisioning] Building flash-linear-attention + causal_conv1d (~10 min)..."
@@ -98,7 +104,7 @@ fi
 # ── HuggingFace login ───────────────────────────────────────────────────────
 if [ -n "$HF_TOKEN" ]; then
     echo "[provisioning] Logging in to HuggingFace Hub..."
-    python -c "from huggingface_hub import login; login(token='${HF_TOKEN}')"
+    python -c "import os; from huggingface_hub import login; login(token=os.environ['HF_TOKEN'])"
 fi
 
 echo ""
@@ -166,8 +172,7 @@ if [ "${EMOTWEN_HEADLESS:-false}" = "true" ]; then
     cloud_sync_down
 
     cd "$REPO_DIR"
-    # shellcheck disable=SC2086
-    python main.py "$STAGE" ${EMOTWEN_OVERRIDES:-}
+    python main.py "$STAGE"
 
     echo ""
     echo "[headless] Pipeline complete."

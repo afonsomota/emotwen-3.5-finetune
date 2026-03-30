@@ -103,6 +103,7 @@ class DataConfig:
     max_empathetic: int = 15000
     max_daily_dialog: int = 6000
     max_go_emotions_synthetic: int = 5000
+    max_dair_emotion: int = 2000
     max_counsel_chat: int = 2000
 
     # Fraction of synthetic single-turn examples to extend to multi-turn
@@ -389,6 +390,4 @@ DEFAULT_MULTI_TURN_EVAL_CONFIG = MultiTurnEvalConfig()
 DEFAULT_GRPO_LORA_CONFIG = GRPOLoraConfig()
 DEFAULT_GRPO_TRAIN_CONFIG = GRPOTrainConfig()
 DEFAULT_GENERATE_MT_CONFIG = GenerateMultiTurnConfig()
-DEFAULT_SELF_CHAT_CONFIG = SelfChatConfig()
-DEFAULT_CONVERSATION_AUGMENT_CONFIG = ConversationAugmentConfig()
 DEFAULT_WANDB_CONFIG = WandbConfig()

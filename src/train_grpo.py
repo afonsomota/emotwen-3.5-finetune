@@ -22,10 +22,9 @@ from pathlib import Path
 
 import torch
 import wandb
-from datasets import load_from_disk
+from datasets import Dataset, load_from_disk
 
 from src.config import (
-    MODEL_NAME,
     MAX_SEQ_LENGTH,
     LOAD_IN_4BIT,
     SYSTEM_PROMPT_GRPO,
@@ -37,39 +36,74 @@ from src.config import (
     WandbConfig,
     SFT_TRAIN_DIR,
 )
-from src.utils import length_reward, advice_penalty_reward
+from src.utils import apply_overrides, length_reward, advice_penalty_reward, wandb_run_name
 
 
 # ─── Model loading ─────────────────────────────────────────────────────────────
 
 def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
-    """Load SFT adapter and re-apply smaller LoRA for GRPO stability."""
-    from unsloth import FastLanguageModel
+    """Load SFT adapter for GRPO training.
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=sft_adapter_path,
-        max_seq_length=MAX_SEQ_LENGTH,
-        load_in_4bit=LOAD_IN_4BIT,
-        use_gradient_checkpointing="unsloth",
-    )
+    Uses standard HF + PEFT instead of Unsloth because Unsloth's compiled
+    attention module (unsloth_compiled_module_qwen3_5.py) crashes during
+    GRPO's accumulated loss computation when it processes empty batches
+    (batch=0 tensors in apply_rotary_pos_emb and attention gating).
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_cfg.r,
-        lora_alpha=lora_cfg.lora_alpha,
-        lora_dropout=lora_cfg.lora_dropout,
-        bias=lora_cfg.bias,
-        target_modules=lora_cfg.target_modules,
-        random_state=lora_cfg.random_state,
-        use_rslora=lora_cfg.use_rslora,
+    When loading from a saved LoRA adapter directory, the adapter is loaded
+    on top of the base model. Otherwise a fresh LoRA is applied.
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from peft import LoraConfig, get_peft_model, PeftModel, prepare_model_for_kbit_training
+
+    is_adapter = (Path(sft_adapter_path) / "adapter_config.json").exists()
+
+    from src.config import MODEL_NAME
+
+    # Load in bf16 (no 4-bit) — the 0.8B model fits easily in GPU memory,
+    # and bitsandbytes Triton kernels can exceed shared memory limits on
+    # some GPUs when not using Unsloth's optimized dequantization.
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
     )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = prepare_model_for_kbit_training(model)
+    model.config.use_cache = False
+
+    if is_adapter:
+        # Load existing SFT adapter on top of base model
+        model = PeftModel.from_pretrained(model, sft_adapter_path, is_trainable=True)
+    else:
+        lora_config = LoraConfig(
+            r=lora_cfg.r,
+            lora_alpha=lora_cfg.lora_alpha,
+            lora_dropout=lora_cfg.lora_dropout,
+            bias=lora_cfg.bias,
+            target_modules=lora_cfg.target_modules,
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_config)
+
+    # TRL's GRPOTrainer expects this attribute
+    # Unsloth patches TRL's GRPOTrainer and expects these methods/attributes.
+    # When loading with pure HF+PEFT, we need to add stubs.
+    if not hasattr(model, "warnings_issued"):
+        model.warnings_issued = {}
+    if not hasattr(model, "for_training"):
+        model.for_training = lambda **kwargs: None
+    if not hasattr(model, "for_inference"):
+        model.for_inference = lambda **kwargs: None
 
     return model, tokenizer
 
 
 # ─── GRPO dataset preparation ─────────────────────────────────────────────────
 
-def _make_grpo_dataset(tokenizer, n_prompts: int):
+def _make_grpo_dataset(tokenizer, n_prompts: int) -> Dataset:
     """
     Build a prompt-only dataset for GRPO from the SFT training set.
 
@@ -113,10 +147,16 @@ def _make_grpo_dataset(tokenizer, n_prompts: int):
 
 # ─── Save and merge ────────────────────────────────────────────────────────────
 
-def _save_merged_model(model, tokenizer, output_dir: str):
+def _save_merged_model(model, tokenizer, output_dir: str) -> None:
     """Save a merged 16-bit model for deployment (vLLM / llama.cpp / Ollama)."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    model.save_pretrained_merged(output_dir, tokenizer, save_method="merged_16bit")
+    # Try Unsloth's merged save first, fall back to standard PEFT merge
+    if hasattr(model, "save_pretrained_merged"):
+        model.save_pretrained_merged(output_dir, tokenizer, save_method="merged_16bit")
+    else:
+        merged = model.merge_and_unload()
+        merged.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
     print(f"Merged 16-bit model saved → {output_dir}")
 
 
@@ -146,11 +186,7 @@ def run(config_overrides: dict | None = None) -> dict:
     skip_if_not_needed = False
     if config_overrides:
         skip_if_not_needed = config_overrides.pop("skip_if_not_needed", False)
-        for k, v in config_overrides.items():
-            for cfg in (lora_cfg, grpo_cfg, wb_cfg):
-                if hasattr(cfg, k):
-                    setattr(cfg, k, v)
-                    break
+    apply_overrides(config_overrides, lora_cfg, grpo_cfg, wb_cfg)
 
     # ── Optional: check eval results to see if GRPO is needed ─────────────────
     from src.config import OUTPUTS_DIR
@@ -172,7 +208,7 @@ def run(config_overrides: dict | None = None) -> dict:
     wandb.init(
         project=wb_cfg.project,
         entity=wb_cfg.entity or None,
-        name=config_overrides.get("run_name", f"grpo_{run_ts}") if config_overrides else f"grpo_{run_ts}",
+        name=wandb_run_name("grpo", run_ts, config_overrides),
         job_type="grpo",
         config={**asdict(lora_cfg), **asdict(grpo_cfg)},
         tags=wb_cfg.tags,
@@ -192,7 +228,7 @@ def run(config_overrides: dict | None = None) -> dict:
 
     grpo_args = GRPOConfig(
         num_generations=grpo_cfg.num_generations,
-        max_new_tokens=grpo_cfg.max_new_tokens,
+        max_completion_length=grpo_cfg.max_new_tokens,
         temperature=grpo_cfg.temperature,
         per_device_train_batch_size=grpo_cfg.per_device_train_batch_size,
         gradient_accumulation_steps=grpo_cfg.gradient_accumulation_steps,

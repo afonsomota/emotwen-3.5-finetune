@@ -27,10 +27,10 @@ import wandb
 from datasets import load_from_disk
 from tqdm import tqdm
 
+import random
 import re
 
 from src.config import (
-    MODEL_NAME,
     MAX_SEQ_LENGTH,
     LOAD_IN_4BIT,
     SYSTEM_PROMPT_BASE,
@@ -42,11 +42,13 @@ from src.config import (
     WandbConfig,
 )
 from src.utils import (
+    apply_overrides,
     count_sentences,
     has_advice,
     pairwise_self_bleu,
     exact_repeat_check,
     longest_common_substring_tokens,
+    wandb_run_name,
 )
 
 
@@ -114,10 +116,7 @@ def _judge_anthropic(user_msg: str, response: str, model: str = "claude-haiku-4-
         return None
 
 
-def _judge_local(user_msg: str, response: str, model_name: str = "unsloth/Qwen3.5-4B") -> dict | None:
-    """Run the judge using a local Qwen model (fallback when no API keys are set)."""
-    results = _judge_local_batch([{"user_msg": user_msg, "response": response}], model_name, batch_size=1)
-    return results[0]
+_judge_model_cache: dict = {}
 
 
 def _judge_local_batch(
@@ -129,7 +128,7 @@ def _judge_local_batch(
     try:
         from transformers import AutoTokenizer, AutoModelForCausalLM
 
-        cache = _judge_local.__dict__
+        cache = _judge_model_cache
         if cache.get("_model_name") != model_name:
             print(f"[judge] Loading local model: {model_name}")
             tok = AutoTokenizer.from_pretrained(model_name)
@@ -276,24 +275,51 @@ def _compute_perplexity(
     total_nll = 0.0
     total_tokens = 0
 
-    for start in tqdm(range(0, len(texts), batch_size), desc="Perplexity"):
-        batch_texts = texts[start:start + batch_size]
-        enc = tokenizer(
-            text=batch_texts, padding=True, truncation=True,
+    import torch.nn.functional as F
+
+    # Process one sequence at a time to avoid shape mismatches caused by
+    # Unsloth's VL-patched attention when batches contain padded sequences.
+    # The VL model's forward may return logits with a different sequence
+    # dimension than input_ids when attention masking interacts with the
+    # patched kernels, causing "tensor a (N) must match tensor b (M)" errors.
+    for text in tqdm(texts, desc="Perplexity"):
+        # Tokenize without padding — single sequence, no pad tokens needed.
+        # Use the underlying text tokenizer if this is a VL processor to
+        # avoid image-source validation on the formatted chat text.
+        underlying_tok = getattr(tokenizer, "tokenizer", tokenizer)
+        enc = underlying_tok(
+            text, truncation=True,
             max_length=MAX_SEQ_LENGTH, return_tensors="pt"
         )
-        input_ids = enc["input_ids"].to(device)
+        input_ids = enc["input_ids"].to(device)          # [1, L]
         attention_mask = enc["attention_mask"].to(device)
 
-        labels = input_ids.clone()
-        labels[labels == tokenizer.pad_token_id] = -100
-
         with torch.no_grad():
-            out = model(input_ids, attention_mask=attention_mask, labels=labels)
+            # Unsloth's compiled module has a rotary embedding bug that
+            # crashes on certain forward paths. Compute logits manually
+            # through the base transformer + lm_head to bypass all patches.
+            lm = getattr(model, "language_model", model)
+            # Get the raw transformer (pre-Unsloth patch) and lm_head
+            base_model = getattr(lm, "model", lm)
+            lm_head = getattr(lm, "lm_head", None)
+            if lm_head is not None:
+                hidden = base_model(input_ids=input_ids, attention_mask=attention_mask)
+                hidden_states = hidden[0]  # last_hidden_state
+                logits = lm_head(hidden_states)
+            else:
+                out = lm(input_ids=input_ids, attention_mask=attention_mask)
+                logits = out.logits
 
-        n_real_tokens = (labels != -100).sum().item()
-        total_nll += out.loss.item() * n_real_tokens
-        total_tokens += n_real_tokens
+        import torch.nn.functional as F
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = input_ids[:, 1:].contiguous()
+        loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        )
+        seq_len = attention_mask.sum().item() - 1
+        total_nll += loss.item() * seq_len
+        total_tokens += seq_len
 
     tokenizer.padding_side = orig_padding_side
     return total_nll / total_tokens if total_tokens > 0 else float("nan")
@@ -346,7 +372,7 @@ def eval_multi_turn(
     tokenizer,
     eval_ds,
     mt_cfg: MultiTurnEvalConfig,
-    rng=None,
+    rng: random.Random | None = None,
 ) -> dict:
     """
     Simulate multi-turn conversations and measure repetition + context drift.
@@ -362,7 +388,6 @@ def eval_multi_turn(
     dict with summary metrics and per-conversation detail rows.
     """
     import random as _random
-    import numpy as np
 
     if rng is None:
         rng = _random.Random(42)
@@ -410,11 +435,35 @@ def eval_multi_turn(
             context.append({"role": "user", "content": user_msg})
             user_turns_used.append(user_msg)
 
-            # Generate assistant response
-            prompt_text = tokenizer.apply_chat_template(
-                context, add_generation_prompt=True, tokenize=False
-            )
-            inputs = tokenizer(
+            # Generate assistant response.
+            # For Unsloth VL processors, calling apply_chat_template with
+            # tokenize=True or passing the formatted string back through the
+            # processor both trigger "Incorrect image source" validation because
+            # the VL processor tries to resolve image placeholders in the text.
+            # The safe path is to always use the underlying text tokenizer
+            # (processor.tokenizer) which skips image validation entirely.
+            import re as _re
+            # Step 1: get the formatted prompt text via the chat template.
+            # Use tokenize=False here — we will tokenize manually below.
+            try:
+                prompt_text = tokenizer.apply_chat_template(
+                    context, add_generation_prompt=True, tokenize=False
+                )
+            except Exception as _e1:
+                # If even the text-only template call fails, build a minimal
+                # fallback prompt from the raw message contents.
+                prompt_text = "\n".join(
+                    f"{m['role'].upper()}: {m['content']}" for m in context
+                ) + "\nASSISTANT:"
+
+            # Step 2: strip any residual vision special-token markup that the
+            # chat template may have injected (e.g. <|vision_start|>...<|vision_end|>).
+            prompt_text = _re.sub(r"<\|vision_start\|>.*?<\|vision_end\|>", "", prompt_text, flags=_re.DOTALL)
+
+            # Step 3: tokenize using the underlying HF text tokenizer so the
+            # VL processor's image validation is bypassed entirely.
+            underlying_tok = getattr(tokenizer, "tokenizer", tokenizer)
+            inputs = underlying_tok(
                 prompt_text, truncation=True,
                 max_length=MAX_SEQ_LENGTH, return_tensors="pt"
             ).to(device)
@@ -551,11 +600,11 @@ def eval_multi_turn(
     print(f"  Mean self-BLEU:                          {results['mt_mean_self_bleu']:.3f}")
     print(f"  Mean contextual relevance:               {mean_relevance:.3f}")
     print(f"  Off-topic rate (< {mt_cfg.relevance_threshold}):              {off_topic_rate:.1%}")
-    print(f"\n  Self-BLEU by turn position:")
+    print("\n  Self-BLEU by turn position:")
     for t, b in enumerate(bleu_by_turn, 1):
         bar = "█" * int(b * 40)
         print(f"    Turn {t}: {b:.3f}  {bar}")
-    print(f"\n  Relevance by turn position:")
+    print("\n  Relevance by turn position:")
     for t, r in enumerate(relevance_by_turn, 1):
         bar = "█" * int(r * 40) if r == r else "?"
         print(f"    Turn {t}: {r:.3f}  {bar}")
@@ -566,6 +615,137 @@ def eval_multi_turn(
         "conversations": all_conversations,
         "all_details": all_details,
     }
+
+
+# ─── W&B eval logging helper ─────────────────────────────────────────────────
+
+def _log_wandb_eval(
+    results: dict,
+    dist: "Counter",
+    responses: list[str],
+    user_messages: list[str],
+) -> None:
+    """Log scalar metrics, sentence distribution chart, and per-sample table to W&B."""
+    grpo_needed = results.get("grpo_needed", False)
+    wandb_metrics = {k: v for k, v in results.items()
+                     if not isinstance(v, (dict, bool)) and v == v}  # exclude nan and dict
+    wandb_metrics["grpo_needed"] = int(grpo_needed)
+    wandb.log(wandb_metrics)
+
+    # Log sentence distribution as a W&B bar chart
+    wandb.log({
+        "sentence_distribution": wandb.plot.bar(
+            wandb.Table(
+                data=[[str(k), v] for k, v in sorted(dist.items())],
+                columns=["sentence_count", "frequency"],
+            ),
+            "sentence_count",
+            "frequency",
+            title="Response Sentence Count Distribution",
+        )
+    })
+
+    # Log per-sample results as a W&B table
+    table_data = [
+        [i, user_messages[i][:100], responses[i][:200],
+         count_sentences(responses[i])[0], has_advice(responses[i])]
+        for i in range(len(responses))
+    ]
+    wandb.log({
+        "eval_samples": wandb.Table(
+            data=table_data,
+            columns=["idx", "user_msg", "response", "n_sentences", "has_advice"],
+        )
+    })
+
+
+# ─── Judge backend resolver ──────────────────────────────────────────────────
+
+def _resolve_judge_backend(cfg: "EvalConfig") -> tuple[str, str]:
+    """
+    Return (active_api, active_model) based on environment variables and cfg.
+
+    Priority: Anthropic (if requested) > OpenAI > Anthropic (fallback) > local.
+    """
+    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+    if has_anthropic and cfg.judge_api == "anthropic":
+        return "anthropic", cfg.judge_model
+    elif has_openai:
+        return "openai", cfg.judge_model
+    elif has_anthropic:
+        return "anthropic", cfg.judge_model
+    else:
+        return "local", cfg.judge_local_model
+
+
+# ─── Sentence stats helper ───────────────────────────────────────────────────
+
+def _compute_sentence_stats(responses: list[str]) -> dict:
+    """
+    Run sentence counting on all responses.
+
+    Returns dict with: n_sentences_list, exempt_count, dist,
+    pct_in_range, pct_over_5.
+    """
+    n_sentences_list = []
+    exempt_count = 0
+
+    for resp in responses:
+        n, exempt = count_sentences(resp)
+        if exempt:
+            exempt_count += 1
+        else:
+            n_sentences_list.append(n if n is not None else 0)
+
+    dist = Counter(n_sentences_list)
+    non_exempt = len(n_sentences_list)
+    in_range = sum(1 for n in n_sentences_list if 2 <= n <= 5)
+    over_5 = sum(1 for n in n_sentences_list if n > 5)
+
+    pct_in_range = in_range / non_exempt if non_exempt else 0.0
+    pct_over_5 = over_5 / non_exempt if non_exempt else 0.0
+
+    print("\n── Sentence count distribution (non-exempt) ──")
+    for k in sorted(dist):
+        bar = "█" * dist[k]
+        print(f"  {k:2d} sentences: {dist[k]:4d}  {bar}")
+    print(f"  Exempt ('Let me explain:'): {exempt_count}")
+    print(f"  In range (2–5): {pct_in_range:.1%}")
+    print(f"  Over 5:         {pct_over_5:.1%}")
+
+    return {
+        "n_sentences_list": n_sentences_list,
+        "exempt_count": exempt_count,
+        "dist": dist,
+        "pct_in_range": pct_in_range,
+        "pct_over_5": pct_over_5,
+    }
+
+
+# ─── Eval prompt preparation ─────────────────────────────────────────────────
+
+def _prepare_eval_prompts(eval_ds, tokenizer) -> tuple[list[str], list[str]]:
+    """
+    For each eval example, build the prompt text (all messages except the
+    final assistant turn) and extract the last user message.
+
+    Returns (prompt_texts, last_user_messages).
+    """
+    prompt_texts = []
+    last_user_messages = []
+    for example in eval_ds:
+        msgs = example["messages"]
+        last_user = next(
+            (m["content"] for m in reversed(msgs) if m["role"] == "user"), ""
+        )
+        prompt_msgs = [m for m in msgs if not (m == msgs[-1] and m["role"] == "assistant")]
+        prompt_texts.append(
+            tokenizer.apply_chat_template(prompt_msgs, add_generation_prompt=True, tokenize=False)
+        )
+        last_user_messages.append(last_user)
+    return prompt_texts, last_user_messages
 
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
@@ -584,19 +764,15 @@ def run(config_overrides: dict | None = None) -> dict:
     """
     cfg: EvalConfig = DEFAULT_EVAL_CONFIG
     wb_cfg: WandbConfig = DEFAULT_WANDB_CONFIG
+    errors: list[str] = []
 
-    if config_overrides:
-        for k, v in config_overrides.items():
-            if hasattr(cfg, k):
-                setattr(cfg, k, v)
-            elif hasattr(wb_cfg, k):
-                setattr(wb_cfg, k, v)
+    apply_overrides(config_overrides, cfg, wb_cfg)
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     wandb.init(
         project=wb_cfg.project,
         entity=wb_cfg.entity or None,
-        name=config_overrides.get("run_name", f"eval_{run_ts}") if config_overrides else f"eval_{run_ts}",
+        name=wandb_run_name("eval", run_ts, config_overrides),
         job_type="evaluation",
         config=asdict(cfg),
         tags=wb_cfg.tags,
@@ -630,18 +806,7 @@ def run(config_overrides: dict | None = None) -> dict:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    all_prompt_texts = []
-    all_last_users = []
-    for example in eval_ds:
-        msgs = example["messages"]
-        last_user = next(
-            (m["content"] for m in reversed(msgs) if m["role"] == "user"), ""
-        )
-        prompt_msgs = [m for m in msgs if not (m == msgs[-1] and m["role"] == "assistant")]
-        all_prompt_texts.append(
-            tokenizer.apply_chat_template(prompt_msgs, add_generation_prompt=True, tokenize=False)
-        )
-        all_last_users.append(last_user)
+    all_prompt_texts, all_last_users = _prepare_eval_prompts(eval_ds, tokenizer)
 
     device = next(model.parameters()).device
     for start in tqdm(range(0, len(all_prompt_texts), cfg.eval_batch_size), desc="Inference"):
@@ -672,31 +837,11 @@ def run(config_overrides: dict | None = None) -> dict:
     print(f"Generated {len(responses)} responses")
 
     # ── Sentence count analysis ───────────────────────────────────────────────
-    n_sentences_list = []
-    exempt_count = 0
-
-    for resp in responses:
-        n, exempt = count_sentences(resp)
-        if exempt:
-            exempt_count += 1
-        else:
-            n_sentences_list.append(n if n is not None else 0)
-
-    dist = Counter(n_sentences_list)
-    non_exempt = len(n_sentences_list)
-    in_range = sum(1 for n in n_sentences_list if 2 <= n <= 5)
-    over_5 = sum(1 for n in n_sentences_list if n > 5)
-
-    pct_in_range = in_range / non_exempt if non_exempt else 0.0
-    pct_over_5 = over_5 / non_exempt if non_exempt else 0.0
-
-    print(f"\n── Sentence count distribution (non-exempt) ──")
-    for k in sorted(dist):
-        bar = "█" * dist[k]
-        print(f"  {k:2d} sentences: {dist[k]:4d}  {bar}")
-    print(f"  Exempt ('Let me explain:'): {exempt_count}")
-    print(f"  In range (2–5): {pct_in_range:.1%}")
-    print(f"  Over 5:         {pct_over_5:.1%}")
+    sent_stats = _compute_sentence_stats(responses)
+    exempt_count = sent_stats["exempt_count"]
+    dist = sent_stats["dist"]
+    pct_in_range = sent_stats["pct_in_range"]
+    pct_over_5 = sent_stats["pct_over_5"]
 
     # ── Advice rate ───────────────────────────────────────────────────────────
     advice_count = sum(1 for r in responses if has_advice(r))
@@ -735,6 +880,7 @@ def run(config_overrides: dict | None = None) -> dict:
         torch.cuda.empty_cache()
     except Exception as e:
         print(f"   Emotion alignment skipped: {e}")
+        errors.append(f"emotion_alignment: {e}")
 
     # ── LLM-as-judge ─────────────────────────────────────────────────────────
     judge_scores: list[dict] = []
@@ -744,21 +890,7 @@ def run(config_overrides: dict | None = None) -> dict:
     llm_length_avg = float("nan")
 
     if cfg.judge_model:
-        has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-        has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-        if has_anthropic and cfg.judge_api == "anthropic":
-            active_api = "anthropic"
-            active_model = cfg.judge_model
-        elif has_openai:
-            active_api = "openai"
-            active_model = cfg.judge_model
-        elif has_anthropic:
-            active_api = "anthropic"
-            active_model = cfg.judge_model
-        else:
-            active_api = "local"
-            active_model = cfg.judge_local_model
+        active_api, active_model = _resolve_judge_backend(cfg)
 
         print(f"\n── LLM-as-judge ({active_model}, api={active_api}) — evaluating 50 samples …")
         judge_pairs = [{"user_msg": u, "response": r}
@@ -790,6 +922,7 @@ def run(config_overrides: dict | None = None) -> dict:
         print(f"   Perplexity proxy (mean NLL/token): {perplexity:.4f}")
     except Exception as e:
         print(f"   Perplexity skipped: {e}")
+        errors.append(f"perplexity: {e}")
 
     # ── Multi-turn evaluation ────────────────────────────────────────────────
     mt_cfg = DEFAULT_MULTI_TURN_EVAL_CONFIG
@@ -854,6 +987,7 @@ def run(config_overrides: dict | None = None) -> dict:
         wandb.log(mt_scalars)
     except Exception as e:
         print(f"   Multi-turn evaluation skipped: {e}")
+        errors.append(f"multi_turn_eval: {e}")
 
     # ── GRPO decision ─────────────────────────────────────────────────────────
     grpo_needed = pct_over_5 > cfg.grpo_trigger_pct
@@ -879,6 +1013,7 @@ def run(config_overrides: dict | None = None) -> dict:
         "n_evaluated": len(responses),
         "n_exempt": exempt_count,
         **{k: v for k, v in mt_results.items() if not isinstance(v, list)},
+        "errors": errors,
     }
 
     Path(cfg.results_save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -887,36 +1022,7 @@ def run(config_overrides: dict | None = None) -> dict:
     print(f"Results saved → {cfg.results_save_path}")
 
     # ── W&B logging ───────────────────────────────────────────────────────────
-    wandb_metrics = {k: v for k, v in results.items()
-                     if not isinstance(v, (dict, bool)) and v == v}  # exclude nan and dict
-    wandb_metrics["grpo_needed"] = int(grpo_needed)
-    wandb.log(wandb_metrics)
-
-    # Log sentence distribution as a W&B bar chart
-    wandb.log({
-        "sentence_distribution": wandb.plot.bar(
-            wandb.Table(
-                data=[[str(k), v] for k, v in sorted(dist.items())],
-                columns=["sentence_count", "frequency"],
-            ),
-            "sentence_count",
-            "frequency",
-            title="Response Sentence Count Distribution",
-        )
-    })
-
-    # Log per-sample results as a W&B table
-    table_data = [
-        [i, user_messages[i][:100], responses[i][:200],
-         count_sentences(responses[i])[0], has_advice(responses[i])]
-        for i in range(len(responses))
-    ]
-    wandb.log({
-        "eval_samples": wandb.Table(
-            data=table_data,
-            columns=["idx", "user_msg", "response", "n_sentences", "has_advice"],
-        )
-    })
+    _log_wandb_eval(results, dist, responses, user_messages)
 
     wandb.finish()
     return results

@@ -136,7 +136,7 @@ def _build_trainer(model, tokenizer, train_ds, val_ds, sft_cfg, stage_name: str)
     return trainer
 
 
-def _print_gpu_stats(label: str):
+def _print_gpu_stats(label: str) -> None:
     if torch.cuda.is_available():
         mem = torch.cuda.max_memory_reserved() / 1024 ** 3
         total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
@@ -192,7 +192,7 @@ def _run_inference_demo(model, tokenizer, n: int = 3):
     FastLanguageModel.for_training(model)
 
 
-def _export_gguf(model, tokenizer, output_dir: str = GGUF_DIR, quantization: str = "q4_k_m"):
+def _export_gguf(model, tokenizer, output_dir: str = GGUF_DIR, quantization: str = "q4_k_m") -> None:
     """Merge LoRA adapter and export to GGUF for mobile deployment."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     print(f"\n─── GGUF export ({quantization}) → {output_dir} ───")
@@ -231,7 +231,6 @@ def run(config_overrides: dict | None = None) -> dict:
             for cfg in (lora_cfg, s1_cfg, s2_cfg, wb_cfg):
                 if hasattr(cfg, k):
                     setattr(cfg, k, v)
-                    break
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     results: dict = {}

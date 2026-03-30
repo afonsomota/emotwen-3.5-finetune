@@ -30,19 +30,14 @@ from datasets import Dataset, DatasetDict, load_dataset
 from src.config import (
     SYSTEM_PROMPT_BASE,
     SYSTEM_PROMPT_RAG,
-    GenerateMultiTurnConfig,
     SelfChatConfig,
     ConversationAugmentConfig,
     DEFAULT_GENERATE_MT_CONFIG,
-    DEFAULT_SELF_CHAT_CONFIG,
-    DEFAULT_CONVERSATION_AUGMENT_CONFIG,
 )
 from src.data_prep import (
-    _REFLECTION_TEMPLATES,
-    _DEFAULT_TEMPLATE,
-    _CONTINUATION_TEMPLATES,
-    _CONTINUATION_LABEL_MAP,
-    _get_reflection,
+    _counsel_chat_to_messages,
+    _dair_emotion_to_messages,
+    _go_emotions_to_messages,
     _extend_to_multi_turn,
 )
 from src.utils import has_advice
@@ -131,97 +126,6 @@ def _build_rag_pool(ge_train: list[dict], label_feature) -> dict[str, list[str]]
             lname = label_feature.int2str(lid)
             pool.setdefault(lname, []).append(row["text"])
     return pool
-
-
-def _make_single_turn_go_emotions(
-    dataset: list[dict],
-    label_feature,
-    system_prompt_base: str,
-    system_prompt_rag: str,
-    rag_fraction: float,
-    rag_pool: dict[str, list[str]],
-    rng: random.Random,
-) -> list[dict]:
-    """Create single-turn synthetic journal conversations from go_emotions."""
-    conversations = []
-    for row in dataset:
-        text = row["text"].strip()
-        label_ids = row["labels"]
-        label_name = label_feature.int2str(label_ids[0]) if label_ids else "neutral"
-        reflection = _get_reflection(label_name, rng)
-
-        use_rag = rng.random() < rag_fraction
-        if use_rag and rag_pool.get(label_name):
-            similar = rng.sample(rag_pool[label_name], min(2, len(rag_pool[label_name])))
-            chunks = "\n\n---\n\n".join(similar)
-            sys_prompt = system_prompt_rag.format(journal_chunks=chunks)
-        else:
-            sys_prompt = system_prompt_base
-
-        messages = [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": f'I wrote this in my journal today:\n\n"{text}"'},
-            {"role": "assistant", "content": reflection},
-        ]
-        conversations.append({
-            "messages": messages,
-            "source": "go_emotions_synthetic",
-            "emotion_label": label_name,
-            "n_turns": 1,
-        })
-    return conversations
-
-
-def _make_single_turn_dair(
-    dataset: list[dict],
-    system_prompt: str,
-    rng: random.Random,
-) -> list[dict]:
-    """Create single-turn synthetic conversations from dair-ai/emotion."""
-    label_map = {0: "sadness", 1: "joy", 2: "love", 3: "anger", 4: "fear", 5: "surprise"}
-    conversations = []
-    for row in dataset:
-        text = row["text"].strip()
-        label_name = label_map.get(row["label"], "neutral")
-        reflection = _get_reflection(label_name, rng)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f'I wrote this in my journal:\n\n"{text}"'},
-            {"role": "assistant", "content": reflection},
-        ]
-        conversations.append({
-            "messages": messages,
-            "source": "dair_emotion_synthetic",
-            "emotion_label": label_name,
-            "n_turns": 1,
-        })
-    return conversations
-
-
-def _make_single_turn_counsel(
-    dataset: list[dict],
-    system_prompt: str,
-    rng: random.Random,
-) -> list[dict]:
-    """Create single-turn synthetic conversations from counsel-chat (client side only)."""
-    conversations = []
-    for row in dataset:
-        question = (row.get("questionText") or row.get("questionTitle") or "").strip()
-        if not question:
-            continue
-        reflection = _get_reflection("neutral", rng)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-            {"role": "assistant", "content": reflection},
-        ]
-        conversations.append({
-            "messages": messages,
-            "source": "counsel_chat_synthetic",
-            "emotion_label": "neutral",
-            "n_turns": 1,
-        })
-    return conversations
 
 
 # ─── Self-chat generation ────────────────────────────────────────────────────
@@ -351,20 +255,6 @@ def _generate_batch(
     return results
 
 
-def _generate_response(
-    model,
-    tokenizer,
-    messages: list[dict],
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-) -> str:
-    """Generate a single response given a message history."""
-    return _generate_batch(
-        model, tokenizer, [messages], max_new_tokens, temperature, top_p,
-    )[0]
-
-
 def generate_self_chat(
     cfg: SelfChatConfig,
     rag_pool: dict[str, list[str]] | None = None,
@@ -390,7 +280,7 @@ def generate_self_chat(
     if rng is None:
         rng = random.Random(cfg.random_seed)
 
-    print(f"\n── Self-chat generation ──────────────────────────────────────────")
+    print("\n── Self-chat generation ──────────────────────────────────────────")
     print(f"  Model: {cfg.model_id}")
     print(f"  Target conversations: {cfg.n_conversations}")
     print(f"  Turn range: {cfg.min_turns}-{cfg.max_turns}")
@@ -586,7 +476,7 @@ def augment_conversations(
     if rng is None:
         rng = random.Random(cfg.random_seed)
 
-    print(f"\n── Conversation augmentation ─────────────────────────────────────")
+    print("\n── Conversation augmentation ─────────────────────────────────────")
     print(f"  Source: {cfg.source_dataset_id}")
     print(f"  Backend: {cfg.backend}")
     print(f"  Target conversations: {cfg.n_conversations}")
@@ -823,12 +713,13 @@ def run(config_overrides: dict | None = None) -> dict:
 
     # ── Generate single-turn conversations ────────────────────────────────────
     print("\nGenerating single-turn conversations …")
-    ge_convs = _make_single_turn_go_emotions(
-        ge_train, label_feature, SYSTEM_PROMPT_BASE, SYSTEM_PROMPT_RAG,
+    ge_convs = _go_emotions_to_messages(
+        ge_train, SYSTEM_PROMPT_BASE, SYSTEM_PROMPT_RAG,
         cfg.rag_injection_fraction, rag_pool, rng,
+        label_feature=label_feature, include_n_turns=True,
     )
-    em_convs = _make_single_turn_dair(em_train, SYSTEM_PROMPT_BASE, rng)
-    cc_convs = _make_single_turn_counsel(cc_train, SYSTEM_PROMPT_BASE, rng)
+    em_convs = _dair_emotion_to_messages(em_train, SYSTEM_PROMPT_BASE, rng, include_n_turns=True)
+    cc_convs = _counsel_chat_to_messages(cc_train, SYSTEM_PROMPT_BASE, rng, include_n_turns=True)
 
     single_turn = ge_convs + em_convs + cc_convs
     print(f"  Total single-turn: {len(single_turn)}")
