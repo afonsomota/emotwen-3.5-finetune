@@ -66,30 +66,26 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
     else:
         bnb_config = None
 
-    if is_adapter:
-        # Load base model + merge the SFT adapter
-        model = AutoModelForCausalLM.from_pretrained(
-            sft_adapter_path,
-            quantization_config=bnb_config,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-        )
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            sft_adapter_path,
-            quantization_config=bnb_config,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-        )
+    from src.config import MODEL_NAME
 
-    tokenizer = AutoTokenizer.from_pretrained(sft_adapter_path)
+    # Always load the base model first
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        quantization_config=bnb_config,
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = prepare_model_for_kbit_training(model)
     model.config.use_cache = False
 
-    if not is_adapter:
+    if is_adapter:
+        # Load existing SFT adapter on top of base model
+        model = PeftModel.from_pretrained(model, sft_adapter_path, is_trainable=True)
+    else:
         lora_config = LoraConfig(
             r=lora_cfg.r,
             lora_alpha=lora_cfg.lora_alpha,
