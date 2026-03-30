@@ -102,9 +102,9 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
     if not hasattr(model, "warnings_issued"):
         model.warnings_issued = {}
     if not hasattr(model, "for_training"):
-        model.for_training = lambda: None
+        model.for_training = lambda **kwargs: None
     if not hasattr(model, "for_inference"):
-        model.for_inference = lambda: None
+        model.for_inference = lambda **kwargs: None
 
     return model, tokenizer
 
