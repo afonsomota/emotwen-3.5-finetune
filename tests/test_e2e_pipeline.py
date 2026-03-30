@@ -188,6 +188,7 @@ def run_grpo() -> dict | None:
         "save_steps": 5,
         "logging_steps": 1,
         "num_generations": 2,
+        "per_device_train_batch_size": 2,
         "skip_if_not_needed": False,
         "report_to": "none",
         # The post-GRPO eval re-run also needs minimal config

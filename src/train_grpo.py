@@ -44,39 +44,65 @@ from src.utils import apply_overrides, length_reward, advice_penalty_reward, wan
 def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
     """Load SFT adapter for GRPO training.
 
-    Uses FastVisionModel (not FastLanguageModel) because Qwen 3.5 is a
-    VLM (ForConditionalGeneration). FastLanguageModel routes through
-    compiled kernels that crash during GRPO's accumulated loss computation
-    (rotary embedding shape mismatch).
+    Uses standard HF + PEFT instead of Unsloth because Unsloth's compiled
+    attention module (unsloth_compiled_module_qwen3_5.py) crashes during
+    GRPO's accumulated loss computation when it processes empty batches
+    (batch=0 tensors in apply_rotary_pos_emb and attention gating).
 
-    fast_inference=False is required for GRPO compatibility.
-    finetune_vision_layers=False keeps training text-only.
+    When loading from a saved LoRA adapter directory, the adapter is loaded
+    on top of the base model. Otherwise a fresh LoRA is applied.
     """
-    from unsloth import FastVisionModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from peft import LoraConfig, get_peft_model, PeftModel, prepare_model_for_kbit_training
 
     is_adapter = (Path(sft_adapter_path) / "adapter_config.json").exists()
 
-    model, tokenizer = FastVisionModel.from_pretrained(
-        model_name=sft_adapter_path,
-        max_seq_length=MAX_SEQ_LENGTH,
-        load_in_4bit=LOAD_IN_4BIT,
-        use_gradient_checkpointing="unsloth",
-        fast_inference=False,
-    )
+    if LOAD_IN_4BIT:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+    else:
+        bnb_config = None
+
+    if is_adapter:
+        # Load base model + merge the SFT adapter
+        model = AutoModelForCausalLM.from_pretrained(
+            sft_adapter_path,
+            quantization_config=bnb_config,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            sft_adapter_path,
+            quantization_config=bnb_config,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+        )
+
+    tokenizer = AutoTokenizer.from_pretrained(sft_adapter_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = prepare_model_for_kbit_training(model)
+    model.config.use_cache = False
 
     if not is_adapter:
-        model = FastVisionModel.get_peft_model(
-            model,
+        lora_config = LoraConfig(
             r=lora_cfg.r,
             lora_alpha=lora_cfg.lora_alpha,
             lora_dropout=lora_cfg.lora_dropout,
             bias=lora_cfg.bias,
             target_modules=lora_cfg.target_modules,
-            random_state=lora_cfg.random_state,
-            use_rslora=lora_cfg.use_rslora,
-            finetune_vision_layers=False,
-            finetune_language_layers=True,
+            task_type="CAUSAL_LM",
         )
+        model = get_peft_model(model, lora_config)
+
+    # TRL's GRPOTrainer expects this attribute
+    if not hasattr(model, "warnings_issued"):
+        model.warnings_issued = {}
 
     return model, tokenizer
 
@@ -130,7 +156,13 @@ def _make_grpo_dataset(tokenizer, n_prompts: int) -> Dataset:
 def _save_merged_model(model, tokenizer, output_dir: str) -> None:
     """Save a merged 16-bit model for deployment (vLLM / llama.cpp / Ollama)."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    model.save_pretrained_merged(output_dir, tokenizer, save_method="merged_16bit")
+    # Try Unsloth's merged save first, fall back to standard PEFT merge
+    if hasattr(model, "save_pretrained_merged"):
+        model.save_pretrained_merged(output_dir, tokenizer, save_method="merged_16bit")
+    else:
+        merged = model.merge_and_unload()
+        merged.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
     print(f"Merged 16-bit model saved → {output_dir}")
 
 
