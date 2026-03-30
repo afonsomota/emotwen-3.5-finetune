@@ -183,7 +183,7 @@ def run_eval() -> dict | None:
 def run_grpo() -> dict | None:
     from src.train_grpo import run
     overrides = {
-        "n_grpo_prompts": 5,
+        "n_grpo_prompts": 20,
         "max_steps": 5,
         "save_steps": 5,
         "logging_steps": 1,
