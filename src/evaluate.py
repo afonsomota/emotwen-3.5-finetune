@@ -295,19 +295,30 @@ def _compute_perplexity(
         attention_mask = enc["attention_mask"].to(device)
 
         with torch.no_grad():
-            # Use the underlying language model to bypass Unsloth's VL
-            # compiled module which has a rotary embedding bug in
-            # apply_rotary_pos_emb (tensor dimension mismatch).
+            # Unsloth's compiled module has a rotary embedding bug that
+            # crashes on certain forward paths. Compute logits manually
+            # through the base transformer + lm_head to bypass all patches.
             lm = getattr(model, "language_model", model)
-            out = lm(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=input_ids,
-            )
+            # Get the raw transformer (pre-Unsloth patch) and lm_head
+            base_model = getattr(lm, "model", lm)
+            lm_head = getattr(lm, "lm_head", None)
+            if lm_head is not None:
+                hidden = base_model(input_ids=input_ids, attention_mask=attention_mask)
+                hidden_states = hidden[0]  # last_hidden_state
+                logits = lm_head(hidden_states)
+            else:
+                out = lm(input_ids=input_ids, attention_mask=attention_mask)
+                logits = out.logits
 
-        if out.loss is not None:
-            seq_len = attention_mask.sum().item() - 1  # tokens used in loss
-            total_nll += out.loss.item() * seq_len
+        import torch.nn.functional as F
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = input_ids[:, 1:].contiguous()
+        loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        )
+        seq_len = attention_mask.sum().item() - 1
+        total_nll += loss.item() * seq_len
             total_tokens += seq_len
 
     tokenizer.padding_side = orig_padding_side
