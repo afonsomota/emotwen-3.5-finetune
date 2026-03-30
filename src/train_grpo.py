@@ -97,8 +97,14 @@ def _load_model_for_grpo(sft_adapter_path: str, lora_cfg: GRPOLoraConfig):
         model = get_peft_model(model, lora_config)
 
     # TRL's GRPOTrainer expects this attribute
+    # Unsloth patches TRL's GRPOTrainer and expects these methods/attributes.
+    # When loading with pure HF+PEFT, we need to add stubs.
     if not hasattr(model, "warnings_issued"):
         model.warnings_issued = {}
+    if not hasattr(model, "for_training"):
+        model.for_training = lambda: None
+    if not hasattr(model, "for_inference"):
+        model.for_inference = lambda: None
 
     return model, tokenizer
 
